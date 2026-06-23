@@ -650,7 +650,7 @@ CREATE TABLE supplier_stats (
 
 **Стратегия:** шардирование по **объёму данных** на шарде, не по `supplier_id`. Все записи идут на один **active** шард; при заполнении шард **sealed** (read-only) и активируется следующий. Sealed шарды «остывают» — почти не читаются.
 
-Подробная модель: [docs/sharding-model.md](docs/sharding-model.md).
+Подробная модель: [sharding-model.md](sharding-model.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -1052,4 +1052,4 @@ Dictionary compression (5x): 20 байт × 100M = 2 GB
 **Версия документа:** 1.1  
 **Дата:** 2026-06-23  
 **Статус:** Draft  
-**Изменения v1.1:** volume-based sharding (rolling seal), редкое чтение, Coordinator, зеркалирование шардов. См. [docs/sharding-model.md](docs/sharding-model.md).
+**Изменения v1.1:** volume-based sharding (rolling seal), редкое чтение, Coordinator, зеркалирование шардов. См. [sharding-model.md](sharding-model.md).

@@ -1,6 +1,6 @@
 # Модель шардирования (volume-based)
 
-> Обновлено под вводную: чтение редкое; шардирование по **объёму** (rolling seal), не по `supplier_id`. См. также [architecture.md](../architecture.md) §7.
+> Обновлено под вводную: чтение редкое; шардирование по **объёму** (rolling seal), не по `supplier_id`. См. также [architecture.md](architecture.md) §7.
 
 ## Суть
 
