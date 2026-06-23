@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Архитектура системы хранения XML-данных</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; margin-top: 30px; border-left: 4px solid #3498db; padding-left: 10px; }
+        h3 { color: #7f8c8d; margin-top: 25px; }
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin: 20px 0;
+            background: white;
+        }
+        th, td { 
+            border: 1px solid #ddd; 
+            padding: 12px; 
+            text-align: left;
+        }
+        th { background: #3498db; color: white; }
+        tr:nth-child(even) { background: #f8f9fa; }
+        pre { 
+            background: #2c3e50; 
+            color: #ecf0f1; 
+            padding: 20px; 
+            border-radius: 5px; 
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        code { 
+            background: #ecf0f1; 
+            padding: 2px 6px; 
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            color: #e74c3c;
+        }
+        pre code { background: none; color: #ecf0f1; padding: 0; }
+        .diagram { 
+            background: #f8f9fa; 
+            padding: 20px; 
+            border-left: 4px solid #3498db;
+            margin: 20px 0;
+            font-family: 'Courier New', monospace;
+            white-space: pre;
+            overflow-x: auto;
+        }
+        .highlight { background: #fff3cd; padding: 2px 6px; }
+        .note { 
+            background: #d1ecf1; 
+            border-left: 4px solid #0c5460; 
+            padding: 15px; 
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Архитектура системы хранения XML-данных с дедупликацией</h1>
+
+        <h2>1. Ключевые выводы из вводных</h2>
+        <table>
+            <tr><th>Параметр</th><th>Значение</th></tr>
+            <tr><td>Основной объем</td><td>Сотни миллионов XML по 50-100 байт</td></tr>
+            <tr><td>Частота</td><td>Высокая, потоковая</td></tr>
+            <tr><td>Пакеты</td><td>ZIP с несколькими XML (часто)</td></tr>
+            <tr><td>Редкие кейсы</td><td>ZIP на несколько МБ с тысячами XML (пару раз в год)</td></tr>
+            <tr><td><strong>Критический паттерн</strong></td><td><strong>Одни и те же XML приходят в разных ZIP от разных поставщиков</strong></td></tr>
+            <tr><td>Удаления</td><td>Нет, только append</td></tr>
+            <tr><td>Требования</td><td>Хранить в оригинальном виде (текст)</td></tr>
+        </table>
+
+        <div class="note">
+            <strong>Ключевой инсайт:</strong> Дедупликация XML — это не оптимизация, а <strong>основной механизм экономии</strong>. 
+            Если одни и те же XML шлют разные поставщики в разных ZIP, экономия может достигать <strong>70-90% объема</strong>.
+        </div>
+
+        <h2>2. Общая архитектура</h2>
+        <div class="diagram">
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENTS / SUPPLIERS                       │
+│              (XML files, ZIP packages via API)                   │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                     INGESTION SERVICE                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐    │
+│  │ Protocol     │  │ ZIP          │  │ Routing &          │    │
+│  │ Adapter      │→ │ Detector &   │→ │ Classification     │    │
+│  │ (HTTP/gRPC)  │  │ Unpacker     │  │ (small/large ZIP)  │    │
+│  └──────────────┘  └──────────────┘  └────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                   DEDUPLICATION ENGINE                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐    │
+│  │ Hash         │  │ Bloom Filter │  │ Hash Index         │    │
+│  │ Calculator   │→ │ (fast check) │→ │ (RocksDB)          │    │
+│  └──────────────┘  └──────────────┘  └────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                     STORAGE ENGINE                               │
+│  ┌────────────────────────┐  ┌──────────────────────────────┐  │
+│  │ Segment Manager        │  │ Write Buffer (batching)      │  │
+│  │ (append-only segments) │  │ (memory → disk flush)        │  │
+│  └────────────────────────┘  └──────────────────────────────┘  │
+│                              ↓                                   │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ SEGMENTS (append-only files, 1-4 GB each)                  │ │
+│  │ [XML1][XML2][XML3]...[XMLn][ZIP1]...[XMLn+1]...            │ │
+│  └────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                   METADATA STORE (PostgreSQL)                    │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐    │
+│  │ packages     │  │ xml_registry │  │ supplier_stats     │    │
+│  └──────────────┘  └──────────────┘  └────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+        </div>
+
+        <h2>3. Компоненты системы</h2>
+
+        <h3>3.1. Ingestion Service</h3>
+        <p><strong>Назначение:</strong> Прием входящих данных, нормализация, классификация.</p>
+        <p><strong>Алгоритм работы:</strong></p>
+        <ol>
+            <li>Принимает данные через протокольный адаптер (HTTP REST/gRPC/очередь)</li>
+            <li>Определяет тип: одиночный XML или ZIP</li>
+            <li>Если ZIP — анализирует размер и количество файлов</li>
+            <li>Маршрутизирует в один из двух потоков:
+                <ul>
+                    <li><strong>Small package flow</strong> (распаковка + дедупликация)</li>
+                    <li><strong>Large package flow</strong> (хранение как есть)</li>
+                </ul>
+            </li>
+        </ol>
+        <p><strong>Критерии маршрутизации:</strong></p>
+        <pre><code>IF zip_size &gt; THRESHOLD_SIZE (100 KB) 
+   OR file_count &gt; THRESHOLD_COUNT (100):
+    → Large package flow
+ELSE:
+    → Small package flow</code></pre>
+
+        <h3>3.2. Deduplication Engine</h3>
+        <p><strong>Назначение:</strong> Определение, является ли XML дубликатом уже сохраненного.</p>
+        <p><strong>Трехуровневая проверка (от быстрой к медленной):</strong></p>
+        <pre><code>УРОВЕНЬ 1: Bloom Filter (O(1), ~10 ns)
+  ↓ miss → новый файл
+  ↓ hit  → УРОВЕНЬ 2
+  
+УРОВЕНЬ 2: Hash Index lookup (O(1), ~1-10 μs)
+  ↓ not found → новый файл
+  ↓ found     → УРОВЕНЬ 3
+  
+УРОВЕНЬ 3: Size verification (O(1), ~100 ns)
+  ↓ size differs → коллизия хеша → новый файл
+  ↓ size matches → ДУБЛИКАТ (используем ссылку)</code></pre>
+
+        <h3>3.3. Storage Engine</h3>
+        <p><strong>Назначение:</strong> Физическая запись и чтение данных в append-only сегменты.</p>
+        <p><strong>Ключевые свойства:</strong></p>
+        <ul>
+            <li>Только append операции (никаких update/delete)</li>
+            <li>Batched writes (буферизация в памяти перед сбросом на диск)</li>
+            <li>Sequential I/O (максимальная пропускная способность диска)</li>
+        </ul>
+
+        <h3>3.4. Metadata Store (PostgreSQL)</h3>
+        <p><strong>Назначение:</strong> Хранение бизнес-метаданных, связей пакет-XML, статистики.</p>
+        <p><strong>Не хранит:</strong> указатели на физическое расположение XML (это делает Hash Index в RocksDB для скорости).</p>
+
+        <h2>4. Алгоритмы</h2>
+
+        <h3>4.1. Алгоритм хеширования</h3>
+        <p><strong>Выбор хеш-функции — критическое решение.</strong></p>
+        <table>
+            <tr><th>Функция</th><th>Скорость</th><th>Стойкость</th><th>Размер</th><th>Рекомендация</th></tr>
+            <tr><td>SHA-256</td><td>~300 MB/s</td><td>Криптографическая</td><td>32 байта</td><td>Избыточно</td></tr>
+            <tr><td>SHA-1</td><td>~600 MB/s</td><td>Практически стойкая</td><td>20 байт</td><td>Допустимо</td></tr>
+            <tr><td><strong>XXH3-128</strong></td><td><strong>~15 GB/s</strong></td><td><strong>Отличная</strong></td><td><strong>16 байт</strong></td><td><strong>Рекомендуется</strong></td></tr>
+            <tr><td>MetroHash-128</td><td>~12 GB/s</td><td>Отличная</td><td>16 байт</td><td>Альтернатива</td></tr>
+        </table>
+        <p><strong>Обоснование выбора XXH3-128:</strong></p>
+        <ul>
+            <li>В 50 раз быстрее SHA-256 (критично для миллионов мелких файлов)</li>
+            <li>128 бит дают вероятность коллизии ~2^-64 на пару файлов — практически нулевая</li>
+            <li>Размер 16 байт экономит место в индексе</li>
+            <li>Не криптографическая, но для дедупликации это не требуется</li>
+        </ul>
+
+        <h3>4.2. Алгоритм дедупликации (Write Path)</h3>
+        <pre><code>FUNCTION process_xml(xml_data, package_id, original_filename):
+    # Шаг 1: Вычисляем быстрый хеш
+    fast_hash = XXH3-128(xml_data)
+    size = len(xml_data)
+    
+    # Шаг 2: Проверяем Bloom Filter
+    IF NOT bloom_filter.might_contain(fast_hash):
+        # Точно новый файл
+        location = storage_engine.append(xml_data)
+        hash_index.put(fast_hash, location)
+        bloom_filter.add(fast_hash)
+        
+        metadata_store.register_new_xml(
+            fast_hash, size, location, package_id, original_filename
+        )
+        RETURN {status: 'new', location: location}
+    
+    # Шаг 3: Bloom Filter сработал — проверяем индекс
+    existing_location = hash_index.get(fast_hash)
+    
+    IF existing_location IS NULL:
+        # Ложное срабатывание Bloom Filter
+        location = storage_engine.append(xml_data)
+        hash_index.put(fast_hash, location)
+        metadata_store.register_new_xml(...)
+        RETURN {status: 'new', location: location}
+    
+    # Шаг 4: Запись существует — проверяем размер
+    IF existing_location.size != size:
+        # Коллизия хеша (крайне редко)
+        slow_hash = SHA-256(xml_data)
+        # Ищем по SHA-256 в отдельном индексе коллизий
+    
+    # Шаг 5: ДУБЛИКАТ — не пишем данные, только ссылку
+    metadata_store.register_reference(
+        fast_hash, existing_location, package_id, original_filename
+    )
+    RETURN {status: 'duplicate', location: existing_location}</code></pre>
+
+        <h3>4.3. Алгоритм обработки пакета (ZIP)</h3>
+        <pre><code>FUNCTION process_package(raw_data, supplier_id):
+    package_hash = SHA-256(raw_data)  # для аудита
+    
+    # Проверяем, не получали ли мы уже этот ZIP
+    IF metadata_store.package_exists(package_hash):
+        RETURN {status: 'duplicate_package', existing_id: ...}
+    
+    # Определяем режим обработки
+    IF is_zip(raw_data):
+        file_count = zip_count_files(raw_data)
+        zip_size = len(raw_data)
+        
+        IF zip_size &gt; THRESHOLD_SIZE OR file_count &gt; THRESHOLD_COUNT:
+            RETURN process_large_zip(raw_data, supplier_id, package_hash)
+        ELSE:
+            RETURN process_small_zip(raw_data, supplier_id, package_hash)
+    ELSE:
+        # Одиночный XML
+        RETURN process_single_xml(raw_data, supplier_id, package_hash)</code></pre>
+
+        <h3>4.4. Алгоритм обработки маленького ZIP</h3>
+        <pre><code>FUNCTION process_small_zip(zip_data, supplier_id, package_hash):
+    # Открываем транзакцию в metadata_store
+    BEGIN TRANSACTION
+    
+    package_id = metadata_store.create_package(
+        supplier_id, package_hash, storage_mode='unpacked'
+    )
+    
+    # Буфер для batch write
+    write_buffer = []
+    xml_refs = []
+    
+    FOR each entry IN zip_entries(zip_data):
+        xml_data = zip_read(entry)
+        
+        # Дедупликация
+        result = process_xml(xml_data, package_id, entry.filename)
+        xml_refs.append(result)
+        
+        # Если новый файл — добавляем в буфер записи
+        IF result.status == 'new':
+            write_buffer.append(xml_data)
+    
+    # Batch write всех новых XML одним проходом
+    IF write_buffer IS NOT EMPTY:
+        locations = storage_engine.batch_append(write_buffer)
+        hash_index.batch_put(locations)
+    
+    metadata_store.finalize_package(package_id, xml_refs)
+    COMMIT
+    
+    RETURN {
+        status: 'ok', 
+        package_id: package_id, 
+        stats: {
+            total: len(xml_refs), 
+            new: count(status='new'), 
+            duplicates: count(status='duplicate')
+        }
+    }</code></pre>
+
+        <h3>4.5. Алгоритм обработки большого ZIP</h3>
+        <pre><code>FUNCTION process_large_zip(zip_data, supplier_id, package_hash):
+    # Стратегия: храним оригинал ZIP как единый объект
+    location = storage_engine.append(zip_data)
+    
+    package_id = metadata_store.create_package(
+        supplier_id, package_hash, 
+        storage_mode='raw',
+        location=location,
+        note='Large package stored as-is'
+    )
+    
+    # Опционально: асинхронная фоновая распаковка
+    IF async_processing_enabled:
+        enqueue_background_task('unpack_and_index_large_zip', package_id)
+    
+    RETURN {status: 'ok', package_id: package_id, mode: 'raw'}</code></pre>
+
+        <h3>4.6. Алгоритм чтения (Read Path)</h3>
+        <pre><code>FUNCTION read_xml(xml_key):
+    # xml_key — это бизнес-ключ или hash
+    location = hash_index.get(xml_key)
+    
+    IF location IS NULL:
+        RETURN {status: 'not_found'}
+    
+    # Single read по известному offset
+    data = storage_engine.read(
+        location.segment_id, 
+        location.offset, 
+        location.size
+    )
+    
+    # Опциональная проверка целостности
+    IF verify_integrity:
+        IF XXH3-128(data) != xml_key:
+            RAISE DataCorruptionError()
+    
+    RETURN {status: 'ok', data: data}
+
+FUNCTION read_package(package_id):
+    package = metadata_store.get_package(package_id)
+    
+    IF package.storage_mode == 'raw':
+        # Читаем оригинальный ZIP
+        zip_data = storage_engine.read(
+            package.location.segment_id,
+            package.location.offset,
+            package.location.size
+        )
+        RETURN {type: 'zip', data: zip_data}
+    
+    ELSE IF package.storage_mode == 'unpacked':
+        # Читаем все XML пакета
+        refs = metadata_store.get_package_contents(package_id)
+        xml_files = []
+        
+        FOR ref IN refs:
+            xml_data = storage_engine.read(
+                ref.location.segment_id,
+                ref.location.offset,
+                ref.location.size
+            )
+            xml_files.append({
+                filename: ref.original_filename, 
+                data: xml_data
+            })
+        
+        RETURN {type: 'xml_collection', files: xml_files}</code></pre>
+
+        <h3>4.7. Алгоритм Batch Write (оптимизация I/O)</h3>
+        <pre><code>CLASS WriteBuffer:
+    buffer = []
+    buffer_size = 0
+    MAX_BUFFER_SIZE = 4 MB
+    MAX_FLUSH_INTERVAL = 100 ms
+    
+    FUNCTION append(xml_data):
+        buffer.append(xml_data)
+        buffer_size += len(xml_data)
+        
+        IF buffer_size &gt;= MAX_BUFFER_SIZE:
+            flush()
+    
+    FUNCTION flush():
+        IF buffer IS EMPTY:
+            RETURN
+        
+        # Группируем в один сегмент
+        segment = segment_manager.get_active_segment()
+        base_offset = segment.current_offset
+        
+        # Формируем единый буфер для записи
+        write_block = []
+        locations = []
+        current_offset = base_offset
+        
+        FOR xml_data IN buffer:
+            header = pack('&lt;I', len(xml_data))  # 4-byte size prefix
+            write_block.append(header)
+            write_block.append(xml_data)
+            
+            locations.append(Location(
+                segment_id=segment.id,
+                offset=current_offset + 4,  # после header
+                size=len(xml_data)
+            ))
+            current_offset += 4 + len(xml_data)
+        
+        # Одна системная запись вместо тысяч
+        segment.write(concat(write_block))
+        segment.fsync()  # или group commit
+        
+        RETURN locations</code></pre>
+        <p><strong>Эффект:</strong> Вместо 10 000 syscall <code>write()</code> на пачку XML — один <code>write()</code> на 4 МБ. Пропускная способность NVMe возрастает с ~100K IOPS до нескольких GB/s.</p>
+
+        <h2>5. Форматы данных</h2>
+
+        <h3>5.1. Формат сегмента</h3>
+        <div class="diagram">
+┌─────────────────────────────────────────────────────────────┐
+│  segment_0001.dat                                           │
+├─────────────────────────────────────────────────────────────┤
+│  [RECORD 1]                                                 │
+│    [4 bytes: magic = 0x584D4C31 "XML1"]                    │
+│    [4 bytes: size = N]                                      │
+│    [N bytes: XML data]                                      │
+│    [16 bytes: XXH3-128 hash]  # для быстрой верификации     │
+│                                                             │
+│  [RECORD 2]                                                 │
+│    [4 bytes: magic]                                         │
+│    [4 bytes: size]                                          │
+│    [N bytes: XML data]                                      │
+│    [16 bytes: hash]                                         │
+│                                                             │
+│  ...                                                        │
+│                                                             │
+│  [RECORD K] (ZIP or XML)                                    │
+│    [4 bytes: magic = 0x5A495031 "ZIP1" or "XML1"]          │
+│    [4 bytes: size]                                          │
+│    [N bytes: data]                                          │
+│    [16 bytes: hash]                                         │
+│                                                             │
+│  [SEGMENT FOOTER]                                           │
+│    [4 bytes: record_count]                                  │
+│    [8 bytes: total_size]                                    │
+│    [16 bytes: segment_hash]                                 │
+│    [4 bytes: footer_magic = 0x464F4F54 "FOOT"]             │
+└─────────────────────────────────────────────────────────────┘
+        </div>
+        <p><strong>Обоснование формата:</strong></p>
+        <ul>
+            <li><strong>Magic number:</strong> защита от чтения "мусора" при сбое</li>
+            <li><strong>Size prefix:</strong> позволяет читать запись без сканирования</li>
+            <li><strong>Hash в конце:</strong> быстрая верификация без повторного чтения</li>
+            <li><strong>Footer:</strong> для валидации сегмента и восстановления после сбоя</li>
+        </ul>
+
+        <h3>5.2. Формат записи в Hash Index (RocksDB)</h3>
+        <pre><code>KEY:   [16 bytes: XXH3-128 hash]
+VALUE: [4 bytes: segment_id] 
+       [8 bytes: offset] 
+       [4 bytes: size]
+       [1 byte: record_type]  # 0=XML, 1=ZIP, 2=compressed
+       [8 bytes: created_at]  # unix timestamp ms
+
+Total: 41 byte на запись</code></pre>
+        <p><strong>Экономия:</strong> 16 байт на ключ вместо 32 (SHA-256) = 50% экономии места в индексе.</p>
+
+        <h3>5.3. Структура Bloom Filter</h3>
+        <p><strong>Параметры:</strong></p>
+        <ul>
+            <li>Ожидаемое количество элементов: 1 млрд</li>
+            <li>Допустимая вероятность false positive: 0.1% (0.001)</li>
+            <li>Размер: ~1.7 GB (рассчитывается по формуле <code>m = -n*ln(p)/(ln(2))^2</code>)</li>
+        </ul>
+        <p><strong>Реализация:</strong></p>
+        <ul>
+            <li>Разбит на 16 сегментов по ~100 MB</li>
+            <li>Каждый сегмент — отдельный файл на диске</li>
+            <li>Загружается в RAM при старте</li>
+            <li>Периодически перестраивается (раз в сутки) при достижении емкости</li>
+        </ul>
+
+        <h3>5.4. Структура метаданных в PostgreSQL</h3>
+        <pre><code>-- Реестр уникальных XML (один раз на уникальный контент)
+CREATE TABLE xml_registry (
+    hash            BYTEA PRIMARY KEY,      # XXH3-128, 16 байт
+    size            INT NOT NULL,
+    segment_id      INT NOT NULL,
+    offset          BIGINT NOT NULL,
+    first_seen_at   TIMESTAMP NOT NULL,
+    reference_count BIGINT DEFAULT 1,       # сколько раз встречается
+    slow_hash       BYTEA                   # SHA-256, только при коллизиях
+);
+
+-- Реестр пакетов
+CREATE TABLE packages (
+    id              BIGSERIAL PRIMARY KEY,
+    supplier_id     INT NOT NULL,
+    received_at     TIMESTAMP NOT NULL,
+    package_hash    BYTEA NOT NULL,         # SHA-256 оригинала
+    storage_mode    VARCHAR(20) NOT NULL,   # 'raw' | 'unpacked' | 'single'
+    
+    # Для 'raw' и 'single'
+    location_segment_id  INT,
+    location_offset      BIGINT,
+    location_size        INT,
+    
+    # Статистика
+    file_count      INT,
+    new_count       INT,                    # сколько новых XML
+    duplicate_count INT,                    # сколько дубликатов
+    total_xml_size  BIGINT,
+    
+    UNIQUE(package_hash)
+);
+
+-- Связь пакет ↔ XML (только для 'unpacked')
+CREATE TABLE package_contents (
+    package_id      BIGINT REFERENCES packages(id),
+    xml_hash        BYTEA REFERENCES xml_registry(hash),
+    original_filename VARCHAR(255),
+    sequence_number INT,                    # порядок в ZIP
+    
+    PRIMARY KEY (package_id, sequence_number)
+);
+
+-- Индексы
+CREATE INDEX idx_packages_supplier ON packages(supplier_id, received_at DESC);
+CREATE INDEX idx_packages_hash ON packages(package_hash);
+CREATE INDEX idx_package_contents_xml ON package_contents(xml_hash);
+
+-- Статистика по поставщикам (для аналитики дедупликации)
+CREATE TABLE supplier_stats (
+    supplier_id         INT PRIMARY KEY,
+    total_packages      BIGINT DEFAULT 0,
+    total_xml_sent      BIGINT DEFAULT 0,
+    unique_xml_count    BIGINT DEFAULT 0,
+    dedup_ratio         DECIMAL(5,2),       # % дубликатов
+    last_activity       TIMESTAMP
+);</code></pre>
+
+        <h2>6. Read/Write Path</h2>
+
+        <h3>Write Path</h3>
+        <div class="diagram">
+                    ┌──────────────────┐
+                    │ Incoming XML/ZIP │
+                    └────────┬─────────┘
+                             ↓
+                    ┌──────────────────┐
+                    │ Protocol Adapter │
+                    └─────────────────┘
+                             ↓
+                    ┌──────────────────┐
+                    │ Type Detection   │
+                    │ (XML vs ZIP)     │
+                    └─────────────────┘
+                             ↓
+              ┌──────────────┴──────────────┐
+              ↓                             ↓
+     ┌────────────────┐           ┌────────────────┐
+     │ Single XML /   │           │ Large ZIP      │
+     │ Small ZIP      │           │                │
+     └────────┬───────┘           └────────┬───────┘
+              ↓                             ↓
+     ┌────────────────┐           ┌────────────────┐
+     │ Unpack ZIP     │           │ Append ZIP     │
+     │ (if needed)    │           │ as single blob │
+     └────────┬───────┘           └────────┬───────┘
+              ↓                             ↓
+     ┌─────────────────────────────────────────────┐
+     │  FOR each XML:                              │
+     │    1. XXH3-128(xml)                         │
+     │    2. Bloom Filter check                    │
+     │    3. IF hit → Hash Index lookup            │
+     │    4. IF found → size verify                │
+     │    5. IF duplicate → skip write             │
+     │    6. IF new → add to write buffer          │
+     └────────┬────────────────────────────────────┘
+              ↓
+     ┌────────────────┐
+     │ Batch Flush    │
+     │ (4 MB or 100ms)│
+     └────────┬───────┘
+              ↓
+     ┌─────────────────────────────────────────────┐
+     │  Single syscall write() to active segment   │
+     │  + fsync (group commit)                     │
+     └────────┬────────────────────────────────────┘
+              ↓
+     ┌─────────────────────────────────────────────┐
+     │  Batch update:                              │
+     │    - Hash Index (RocksDB)                   │
+     │    - Bloom Filter                           │
+     │    - PostgreSQL (xml_registry,              │
+     │      packages, package_contents)            │
+     └─────────────────────────────────────────────┘
+        </div>
+
+        <h3>Read Path</h3>
+        <div class="diagram">
+     ┌──────────────────┐
+     │ Read Request     │
+     │ (by xml_key or   │
+     │  package_id)     │
+     └────────┬─────────┘
+              ↓
+     ┌────────┴─────────┐
+     ↓                  ↓
+┌─────────┐      ┌──────────────┐
+│ By XML  │      │ By Package   │
+│ key     │      │              │
+└────┬────┘      └──────┬───────┘
+     ↓                  ↓
+┌──────────────┐ ┌──────────────────┐
+│ Hash Index   │ │ PostgreSQL:      │
+│ lookup       │ │ get package      │
+│ (RocksDB)    │ │ metadata         │
+└──────┬───────┘ └──────┬───────────┘
+       ↓                ↓
+       ↓         ┌──────┴───────┐
+       ↓         ↓              ↓
+       ↓   ┌──────────┐  ┌──────────┐
+       ↓   │ mode=raw │  │ mode=    │
+       ↓   │          │  │ unpacked │
+       ↓   └────┬─────  └─────────┘
+       ↓        ↓             ↓
+       ↓   ┌────────┐  ┌────────────┐
+       ↓   │ Single │  │ For each   │
+       ↓   │ read   │  │ XML:       │
+       ↓   └────┬───┘  │ Hash Index │
+       ↓        ↓      │ lookup     │
+       ↓        │      └──────┬─────┘
+       ↓        │             ↓
+       └─────────────────────┴───┐
+                                  ↓
+                    ┌──────────────────────┐
+                    │ Storage Engine:      │
+                    │ seek() + read()      │
+                    │ from segment file    │
+                    └──────────┬───────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │ Optional: verify     │
+                    │ hash integrity       │
+                    └──────────┬───────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │ Return data          │
+                    └──────────────────────┘
+        </div>
+
+        <h2>7. Масштабирование</h2>
+
+        <h3>7.1. Вертикальное (Single Node)</h3>
+        <p><strong>Ограничения одного сервера:</strong></p>
+        <ul>
+            <li>Сегменты: до 100 TB на один сервер (ограничение дискового пространства)</li>
+            <li>Hash Index (RocksDB): до 10-20 млрд записей на NVMe</li>
+            <li>Write throughput: 1-3 GB/s на один NVMe</li>
+            <li>Read IOPS: 500K-1M на NVMe</li>
+        </ul>
+
+        <h3>7.2. Горизонтальное масштабирование</h3>
+        <p><strong>Стратегия шардирования по supplier_id:</strong></p>
+        <div class="diagram">
+┌─────────────────────────────────────────────────────────┐
+│                   ROUTER / GATEWAY                       │
+│         shard_id = hash(supplier_id) % N                 │
+└────┬──────────────┬──────────────┬──────────────┬───────┘
+     ↓              ↓              ↓              ↓
+┌─────────┐   ┌─────────┐   ┌─────────   ┌─────────┐
+│ Shard 0 │   │ Shard 1 │   │ Shard 2 │   │ Shard N │
+│         │   │         │   │         │   │         │
+│ Ingest  │   │ Ingest  │   │ Ingest  │   │ Ingest  │
+│ Dedup   │   │ Dedup   │   │ Dedup   │   │ Dedup   │
+│ Storage │   │ Storage │   │ Storage │   │ Storage │
+│ RocksDB │   │ RocksDB │   │ RocksDB │   │ RocksDB │
+│ Postgres│   │ Postgres│   │ Postgres│   │ Postgres│
+└─────────┘   └─────────┘   └─────────   └─────────┘
+        </div>
+        <p><strong>Важно:</strong> Дедупликация работает <strong>внутри шарда</strong>. Если один и тот же XML шлют поставщики из разных шардов — он сохранится дважды.</p>
+        <p><strong>Компромисс:</strong> Глобальная дедупликация требует распределенного Hash Index (например, FoundationDB или CockroachDB), что усложняет архитектуру. Для большинства случаев шардирование по поставщикам достаточно — один поставщик обычно шлет одни и те же XML повторно.</p>
+
+        <h3>7.3. Масштабирование Hash Index</h3>
+        <p>Если один RocksDB не вмещает все записи:</p>
+        <ul>
+            <li><strong>Range partitioning:</strong> по первым байтам хеша</li>
+            <li><strong>Consistent hashing:</strong> распределение по нодам</li>
+            <li><strong>Tiered storage:</strong> горячие записи на NVMe, холодные на HDD</li>
+        </ul>
+
+        <h2>8. Отказоустойчивость</h2>
+
+        <h3>8.1. Durability (сохранность данных)</h3>
+        <p><strong>Write-ahead log (WAL) для метаданных:</strong></p>
+        <ul>
+            <li>PostgreSQL: встроенный WAL</li>
+            <li>RocksDB: встроенный WAL</li>
+            <li>Сегменты: fsync после каждого batch</li>
+        </ul>
+        <p><strong>Group commit:</strong></p>
+        <ul>
+            <li>Несколько записей группируются в один fsync</li>
+            <li>Уменьшает нагрузку на диск в 10-100 раз</li>
+            <li>Задержка: до 1-10 ms (настраивается)</li>
+        </ul>
+
+        <h3>8.2. Recovery после сбоя</h3>
+        <p><strong>Сценарий: crash во время batch write</strong></p>
+        <ol>
+            <li>При старте проверяем footer каждого сегмента</li>
+            <li>Если footer поврежден → сегмент обрезается до последней валидной записи</li>
+            <li>Hash Index перестраивается из сегментов (full scan)</li>
+            <li>PostgreSQL уже имеет WAL → метаданные консистентны</li>
+        </ol>
+
+        <p><strong>Сценарий: потеря сегмента</strong></p>
+        <ol>
+            <li>Обнаруживается при чтении (checksum mismatch)</li>
+            <li>Помечаем записи как "lost" в специальном индексе</li>
+            <li>Данные невосстановимы (но это append-only, бэкапы сегментов обязательны)</li>
+        </ol>
+
+        <h3>8.3. Бэкапы</h3>
+        <p><strong>Стратегия:</strong></p>
+        <ul>
+            <li>Сегменты: инкрементальные бэкапы (restic/borg) — дедупликация на уровне бэкапов</li>
+            <li>RocksDB: снапшоты через <code>Checkpoint</code> API</li>
+            <li>PostgreSQL: PITR (Point-in-Time Recovery)</li>
+        </ul>
+        <p><strong>RPO/RTO:</strong></p>
+        <ul>
+            <li>RPO: до 1 часа (зависит от частоты бэкапов WAL)</li>
+            <li>RTO: до 4 часов (восстановление из бэкапа + rebuild индекса)</li>
+        </ul>
+
+        <h2>9. Оценка эффективности</h2>
+
+        <h3>9.1. Экономия места от дедупликации</h3>
+        <p><strong>Сценарий:</strong> 100 млн XML по 100 байт, из них 30% — уникальные</p>
+        <table>
+            <tr><th>Метрика</th><th>Без дедупликации</th><th>С дедупликацией</th><th>Экономия</th></tr>
+            <tr><td>XML данные</td><td>10 GB</td><td>3 GB</td><td>70%</td></tr>
+            <tr><td>Индекс (RocksDB)</td><td>—</td><td>~4 GB (100M × 41 байт)</td><td>—</td></tr>
+            <tr><td>PostgreSQL metadata</td><td>—</td><td>~10 GB</td><td>—</td></tr>
+            <tr><td><strong>Итого</strong></td><td><strong>10 GB</strong></td><td><strong>~17 GB</strong></td><td><strong>... но</strong></td></tr>
+        </table>
+        <div class="note">
+            <strong>Подождите!</strong> Индекс и метаданные <strong>больше</strong>, чем сами данные. Это важный инсайт.
+        </div>
+
+        <h3>9.2. Переоценка: когда дедупликация выгодна</h3>
+        <p><strong>Дедупликация выгодна, когда:</strong></p>
+        <ul>
+            <li>XML большие (от 1 КБ)</li>
+            <li>Коэффициент дедупликации высокий (&gt;50%)</li>
+            <li>Поставщики шлют одни и те же данные часто</li>
+        </ul>
+
+        <p><strong>Дедупликация НЕ выгодна, когда:</strong></p>
+        <ul>
+            <li>XML по 50 байт (индекс больше данных)</li>
+            <li>Все XML уникальны</li>
+            <li>Низкая нагрузка на диск, высокая на CPU</li>
+        </ul>
+
+        <h3>9.3. Альтернативная стратегия: Dictionary Compression</h3>
+        <p>Для XML по 50-100 байт <strong>словарное сжатие эффективнее дедупликации</strong>:</p>
+        <pre><code>Без сжатия: 100 байт × 100M = 10 GB
+Dictionary compression (5x): 20 байт × 100M = 2 GB
+Индекс: 0 (ключи в PostgreSQL)
+Итого: 2 GB + 2 GB (PostgreSQL) = 4 GB</code></pre>
+
+        <div class="note">
+            <strong>Рекомендация:</strong> Использовать <strong>комбинацию</strong>:
+            <ol>
+                <li>Dictionary compression для всех XML (5-10x сжатие)</li>
+                <li>Дедупликация <strong>только для XML &gt; 1 KB</strong> (где индекс окупается)</li>
+                <li>Для маленьких XML — только сжатие + ключи в PostgreSQL</li>
+            </ol>
+        </div>
+
+        <h2>10. Итоговая архитектура (финальная версия)</h2>
+        <div class="diagram">
+┌─────────────────────────────────────────────────────────────┐
+│                        INGESTION                             │
+│  Protocol Adapter → ZIP Detector → Router                   │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+              ┌───────────────┴───────────────┐
+              ↓                               ↓
+     ┌────────────────┐             ┌────────────────┐
+     │ Small XML/ZIP  │             │ Large ZIP      │
+     │ (&lt; 100 KB)     │             │ (≥ 100 KB)     │
+     └────────┬───────┘             └────────┬───────┘
+              ↓                               ↓
+     ┌────────────────┐             ┌────────────────┐
+     │ Dictionary     │             │ Append as-is   │
+     │ Compression    │             │ to segment     │
+     │ (5-10x)        │             │                │
+     └────────┬───────┘             └────────┬───────┘
+              ↓                               ↓
+     ┌────────────────                       │
+     │ IF size &gt; 1KB: │                       │
+     │   Dedup check  │                       │
+     │ ELSE:          │                       │
+     │   Just write   │                       │
+     └────────┬───────┘                       │
+              ↓                               ↓
+     ┌────────────────────────────────────────────┐
+     │        BATCH WRITE BUFFER (4 MB)           │
+     │        Single syscall → segment            │
+     └────────────────────────────────────────────┘
+                              ↓
+     ┌────────────────────────────────────────────┐
+     │ SEGMENTS (append-only, 1-4 GB each)        │
+     │ Compressed XML + Raw large ZIPs            │
+     └────────────────────────────────────────────┘
+                              ↓
+     ┌────────────────────────────────────────────┐
+     │ POSTGRESQL                                 │
+     │ - xml_registry (hash → location)           │
+     │ - packages                                 │
+     │ - package_contents                         │
+     │ - dictionary (compression tables)          │
+     └────────────────────────────────────────────┘
+        </div>
+
+        <h2>11. Ключевые решения и trade-offs</h2>
+        <table>
+            <tr><th>Решение</th><th>Обоснование</th><th>Альтернатива</th></tr>
+            <tr><td>XXH3-128 для хеша</td><td>Скорость в 50 раз выше SHA-256</td><td>SHA-256 (если нужна крипто-стойкость)</td></tr>
+            <tr><td>Append-only сегменты</td><td>Простота, нет GC, быстрый write</td><td>B-Tree (сложнее, но с update)</td></tr>
+            <tr><td>Batch write</td><td>Уменьшение syscall в 1000x</td><td>Per-record write (медленно)</td></tr>
+            <tr><td>Dictionary compression</td><td>5-10x для мелких XML</td><td>Дедупликация (неэффективна для 50 байт)</td></tr>
+            <tr><td>Пороговое правило для ZIP</td><td>Баланс между экономией и сложностью</td><td>Всегда распаковывать (дорого для больших)</td></tr>
+            <tr><td>PostgreSQL для метаданных</td><td>ACID, зрелая, знакомая</td><td>RocksDB для всего (сложнее)</td></tr>
+            <tr><td>Шардирование по supplier_id</td><td>Локальность данных, простая дедупликация</td><td>Глобальная дедупликация (сложнее)</td></tr>
+        </table>
+
+        <h2>12. Дорожная карта внедрения</h2>
+
+        <h3>Фаза 1 (MVP):</h3>
+        <ul>
+            <li>Append-only сегменты без сжатия и дедупликации</li>
+            <li>PostgreSQL для всего (и метаданные, и указатели)</li>
+            <li>Базовая обработка ZIP</li>
+        </ul>
+
+        <h3>Фаза 2 (Оптимизация):</h3>
+        <ul>
+            <li>Dictionary compression для XML</li>
+            <li>Пороговое правило для больших ZIP</li>
+            <li>Batch write</li>
+        </ul>
+
+        <h3>Фаза 3 (Дедупликация):</h3>
+        <ul>
+            <li>Bloom Filter + RocksDB Hash Index</li>
+            <li>Дедупликация для XML &gt; 1 KB</li>
+            <li>Статистика дедупликации по поставщикам</li>
+        </ul>
+
+        <h3>Фаза 4 (Масштабирование):</h3>
+        <ul>
+            <li>Шардирование</li>
+            <li>Репликация</li>
+            <li>Мониторинг и алертинг</li>
+        </ul>
+
+        <h2>13. Приложения</h2>
+
+        <h3>A. Глоссарий</h3>
+        <table>
+            <tr><th>Термин</th><th>Определение</th></tr>
+            <tr><td><strong>Дедупликация</strong></td><td>Механизм устранения дублирования данных путем хранения только уникальных блоков</td></tr>
+            <tr><td><strong>Content-Defined Chunking (CDC)</strong></td><td>Алгоритм разбиения данных на чанки на основе их содержимого, а не фиксированных границ</td></tr>
+            <tr><td><strong>Bloom Filter</strong></td><td>Вероятностная структура данных для быстрой проверки принадлежности элемента множеству</td></tr>
+            <tr><td><strong>Append-only</strong></td><td>Паттерн хранения, при котором данные только добавляются, но не изменяются и не удаляются</td></tr>
+            <tr><td><strong>Batch write</strong></td><td>Группировка нескольких операций записи в одну системную операцию для повышения производительности</td></tr>
+            <tr><td><strong>XXH3</strong></td><td>Быстрая некриптографическая хеш-функция семейства XXH</td></tr>
+        </table>
+
+        <h3>B. Рекомендуемые технологии</h3>
+        <table>
+            <tr><th>Компонент</th><th>Технология</th><th>Альтернативы</th></tr>
+            <tr><td>Hash Index</td><td>RocksDB</td><td>LevelDB, LMDB, BadgerDB</td></tr>
+            <tr><td>Database</td><td>PostgreSQL 14+</td><td>CockroachDB, TiDB (для шардирования)</td></tr>
+            <tr><td>Bloom Filter</td><td>pybloom-live, bloom-filter2</td><td>Cuckoo filter</td></tr>
+            <tr><td>Compression</td><td>Zstd, LZ4</td><td>Snappy, Brotli</td></tr>
+            <tr><td>Hash Function</td><td>xxhash (XXH3-128)</td><td>MetroHash, FarmHash</td></tr>
+            <tr><td>Backup</td><td>restic, borg</td><td>rclone, rsync + zfs snapshots</td></tr>
+        </table>
+
+        <h3>C. Метрики для мониторинга</h3>
+        <p><strong>Производительность:</strong></p>
+        <ul>
+            <li>Write throughput (MB/s)</li>
+            <li>Read latency (p50, p95, p99)</li>
+            <li>IOPS (read/write)</li>
+            <li>Batch flush frequency</li>
+        </ul>
+
+        <p><strong>Эффективность дедупликации:</strong></p>
+        <ul>
+            <li>Deduplication ratio (unique/total)</li>
+            <li>Bloom filter false positive rate</li>
+            <li>Hash index size vs data size</li>
+            <li>Storage savings (GB, %)</li>
+        </ul>
+
+        <p><strong>Надежность:</strong></p>
+        <ul>
+            <li>fsync latency</li>
+            <li>WAL lag</li>
+            <li>Segment corruption rate</li>
+            <li>Recovery time</li>
+        </ul>
+
+        <p><strong>Бизнес-метрики:</strong></p>
+        <ul>
+            <li>Packages per supplier</li>
+            <li>Duplicate rate by supplier</li>
+            <li>Average package size</li>
+            <li>Peak load times</li>
+        </ul>
+
+        <hr>
+        <p><strong>Версия документа:</strong> 1.0<br>
+        <strong>Дата:</strong> 2026-06-23<br>
+        <strong>Статус:</strong> Draft</p>
+    </div>
+</body>
+</html>
