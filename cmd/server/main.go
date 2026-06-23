@@ -1,0 +1,92 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/little-big-files/little-big-files/internal/api"
+	"github.com/little-big-files/little-big-files/internal/compress"
+	"github.com/little-big-files/little-big-files/internal/config"
+	"github.com/little-big-files/little-big-files/internal/ingestion"
+	"github.com/little-big-files/little-big-files/internal/metadata"
+	"github.com/little-big-files/little-big-files/internal/storage"
+)
+
+func main() {
+	cfg := config.Load()
+	ctx := context.Background()
+
+	if err := metadata.RunMigrations(ctx, cfg.PGDSN, cfg.MigrationsPath); err != nil {
+		slog.Error("migrations failed", "err", err)
+		os.Exit(1)
+	}
+
+	repo, err := metadata.NewPostgresRepository(ctx, cfg.PGDSN)
+	if err != nil {
+		slog.Error("postgres connect failed", "err", err)
+		os.Exit(1)
+	}
+	defer repo.Close()
+
+	segments, err := storage.NewSegmentManager(cfg.DataDir, cfg.SegmentMaxSize)
+	if err != nil {
+		slog.Error("segment manager failed", "err", err)
+		os.Exit(1)
+	}
+	defer segments.Close()
+
+	if cfg.WriteBufferMaxBytes > 0 {
+		wb := storage.NewWriteBuffer(segments, cfg.WriteBufferMaxBytes, cfg.WriteBufferInterval)
+		segments.SetWriteBuffer(wb)
+		slog.Info("write buffer enabled", "max_bytes", cfg.WriteBufferMaxBytes, "interval", cfg.WriteBufferInterval)
+	}
+
+	encoder, err := compress.BootstrapEncoder(ctx, cfg, repo)
+	if err != nil {
+		slog.Error("compression init failed", "err", err)
+		os.Exit(1)
+	}
+	if encoder != nil {
+		defer encoder.Close()
+	}
+
+	blobs := storage.NewBlobStore(segments, encoder)
+	ingest := ingestion.NewService(cfg, repo, blobs)
+
+	var unpackQ *ingestion.UnpackQueue
+	if cfg.LargeZipAsyncUnpack {
+		unpackQ = ingestion.NewUnpackQueue(ingest, cfg.UnpackWorkers, cfg.UnpackQueueSize)
+		ingest.SetUnpackQueue(unpackQ)
+		defer unpackQ.Shutdown()
+	}
+
+	srv := api.NewServer(cfg, ingest, repo, blobs)
+
+	httpSrv := &http.Server{
+		Addr:         cfg.HTTPAddr,
+		Handler:      srv.Router(),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+	}
+
+	go func() {
+		slog.Info("listening", "addr", cfg.HTTPAddr)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
+}

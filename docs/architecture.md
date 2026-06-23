@@ -1,18 +1,20 @@
 # Архитектура системы хранения XML-данных с дедупликацией
 
+> **Реализация (Фаза 1):** content-addressed storage, прозрачная dedup, HTTP API `/v1/packages`. Стэк: [stack.md](stack.md). Модель шардов: [sharding-model.md](sharding-model.md).
+
 ## 1. Ключевые выводы из вводных
 
 | Параметр | Значение |
 |----------|----------|
-| Основной объем | Сотни миллионов XML по 50-100 байт |
-| Частота | Высокая, потоковая |
-| Пакеты | ZIP с несколькими XML (часто) |
+| Основной объем | Сотни миллионов XML; типичный posted000 **~400–700 B**, outlier до **16 KB** |
+| Частота | Высокая, потоковая (~**1000 pkg/s** на пике) |
+| Пакеты | ZIP с 1 XML (~85%) или bulk ZIP (до ~85 XML) |
 | Редкие кейсы | ZIP на несколько МБ с тысячами XML (пару раз в год) |
-| **Критический паттерн** | **Одни и те же XML приходят в разных ZIP от разных поставщиков** |
+| **Критический паттерн** | **Прозрачная dedup:** клиент всегда получает новый `package_id`, физически — shared blobs |
 | Удаления | Нет, только append |
-| Требования | Хранить в оригинальном виде (текст) |
-| **Чтение** | **Очень редко** — загрузка в систему анализа, разбор конфликтных ситуаций |
-| **Шардирование** | По **объёму** на шарде (rolling seal); данные «остывают», sealed шарды почти не читаются |
+| Требования | Хранить в оригинальном виде (текст); ZIP = original + members |
+| **Чтение** | **Очень редко** — анализ, разбор конфликтов |
+| **Шардирование** | По **объёму** на шарде (rolling seal); см. [sharding-model.md](sharding-model.md) |
 
 > **Ключевой инсайт:** Дедупликация XML — это не оптимизация, а **основной механизм экономии**. Если одни и те же XML шлют разные поставщики в разных ZIP, экономия может достигать **70-90% объема**. Дедупликация на **active** шарде работает **между всеми поставщиками** в текущем потоке записи.
 
@@ -59,7 +61,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                   METADATA STORE (PostgreSQL)                    │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐    │
-│  │ packages     │  │ xml_registry │  │ supplier_stats     │    │
+│  │ packages     │  │ package_files│  │ content_blobs      │    │
 │  └──────────────┘  └──────────────┘  └────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -131,66 +133,61 @@ ELSE:
 
 ### 4.1. Алгоритм хеширования
 
-**Выбор хеш-функции — критическое решение.**
+| Ключ | Функция | Назначение |
+|------|---------|------------|
+| `package_hash` | **SHA-256** тела POST | Package-level dedup (clone refs) |
+| `content_hash` | **SHA-256** bytes blob | Blob-level dedup (`StoreOrRef`) |
 
-| Функция | Скорость | Стойкость | Размер | Рекомендация |
-|---------|----------|-----------|--------|--------------|
-| SHA-256 | ~300 MB/s | Криптографическая | 32 байта | Избыточно |
-| SHA-1 | ~600 MB/s | Практически стойкая | 20 байт | Допустимо |
-| **XXH3-128** | **~15 GB/s** | **Отличная** | **16 байт** | **Рекомендуется** |
-| MetroHash-128 | ~12 GB/s | Отличная | 16 байт | Альтернатива |
-
-**Обоснование выбора XXH3-128:**
-
-- В 50 раз быстрее SHA-256 (критично для миллионов мелких файлов)
-- 128 бит дают вероятность коллизии ~2^-64 на пару файлов — практически нулевая
-- Размер 16 байт экономит место в индексе
-- Не криптографическая, но для дедупликации это не требуется
-
-### 4.2. Алгоритм дедупликации (Write Path)
+### 4.2. StoreOrRef (Write Path)
 
 ```
-FUNCTION process_xml(xml_data, package_id, original_filename):
-    # Шаг 1: Вычисляем быстрый хеш
-    fast_hash = XXH3-128(xml_data)
-    size = len(xml_data)
-    
-    # Шаг 2: Проверяем Bloom Filter
-    IF NOT bloom_filter.might_contain(fast_hash):
-        # Точно новый файл
-        location = storage_engine.append(xml_data)
-        hash_index.put(fast_hash, location)
-        bloom_filter.add(fast_hash)
-        
-        metadata_store.register_new_xml(
-            fast_hash, size, location, package_id, original_filename
-        )
-        RETURN {status: 'new', location: location}
-    
-    # Шаг 3: Bloom Filter сработал — проверяем индекс
-    existing_location = hash_index.get(fast_hash)
-    
-    IF existing_location IS NULL:
-        # Ложное срабатывание Bloom Filter
-        location = storage_engine.append(xml_data)
-        hash_index.put(fast_hash, location)
-        metadata_store.register_new_xml(...)
-        RETURN {status: 'new', location: location}
-    
-    # Шаг 4: Запись существует — проверяем размер
-    IF existing_location.size != size:
-        # Коллизия хеша (крайне редко)
-        slow_hash = SHA-256(xml_data)
-        # Ищем по SHA-256 в отдельном индексе коллизий
-    
-    # Шаг 5: ДУБЛИКАТ — не пишем данные, только ссылку
-    metadata_store.register_reference(
-        fast_hash, existing_location, package_id, original_filename
-    )
-    RETURN {status: 'duplicate', location: existing_location}
+FUNCTION StoreOrRef(data, record_type):
+    content_hash = SHA-256(data)
+    IF content_blobs.exists(content_hash):
+        ref_count++
+        RETURN content_hash
+    location = segment.append(data)
+    INSERT content_blobs(content_hash, location, ref_count=1)
+    RETURN content_hash
 ```
 
-### 4.3. Алгоритм обработки пакета (ZIP)
+### 4.3. Алгоритм обработки пакета (POST /v1/packages)
+
+```
+FUNCTION process_package(body, supplier_id):
+    package_hash = SHA-256(body)
+
+    IF canonical = packages.find_first(package_hash):
+        new_id = packages.insert(supplier_id, canonical_package_id=canonical)
+        clone package_files refs from canonical → ref_count++ on each blob
+        RETURN 201 new_id   # без 409, без сигнала dedup клиенту
+
+    IF payload is XML:
+        hash = StoreOrRef(body)
+        INSERT package + package_files(role=original)
+        RETURN 201
+
+    IF payload is ZIP:
+        hash_zip = StoreOrRef(body)
+        IF large (>100KB or >100 files):
+            INSERT package(storage_mode=raw_large) + original only
+        ELSE:
+            TRY unpack ZIP
+            IF fail:
+                StoreOrRef(_unpack_error.txt)
+                INSERT original + unpack_error; unpack_status=failed in JSON
+            ELSE:
+                FOR each member: StoreOrRef(member)
+                INSERT original + members; unpack_status=ok
+        RETURN 201
+```
+
+**Прозрачность:** клиент не видит `canonical_package_id`, `ref_count`, `content_hash`. Повторная загрузка → новые `package_id` / `file_id`, те же bytes на GET.
+
+### 4.3.1. Алгоритм обработки пакета (ZIP) — legacy pseudocode
+
+<details>
+<summary>Устаревший pseudocode (до v1.2)</summary>
 
 ```
 FUNCTION process_package(raw_data, supplier_id):
@@ -214,7 +211,9 @@ FUNCTION process_package(raw_data, supplier_id):
         RETURN process_single_xml(raw_data, supplier_id, package_hash)
 ```
 
-### 4.4. Алгоритм обработки маленького ZIP
+</details>
+
+### 4.4. Алгоритм обработки маленького ZIP (legacy)
 
 ```
 FUNCTION process_small_zip(zip_data, supplier_id, package_hash):
@@ -458,7 +457,47 @@ Total: 41 byte на запись
 - Загружается в RAM при старте
 - Периодически перестраивается (раз в сутки) при достижении емкости
 
-### 5.4. Структура метаданных в PostgreSQL
+### 5.4. Структура метаданных в PostgreSQL (v1.2)
+
+```sql
+CREATE TABLE content_blobs (
+    content_hash    BYTEA PRIMARY KEY,     -- SHA-256(bytes)
+    size            INT NOT NULL,
+    segment_id      INT NOT NULL,
+    offset          BIGINT NOT NULL,
+    ref_count       BIGINT NOT NULL DEFAULT 1,
+    first_seen_at   TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE packages (
+    id                   BIGSERIAL PRIMARY KEY,
+    supplier_id          INT NOT NULL,
+    received_at          TIMESTAMPTZ NOT NULL,
+    package_hash         BYTEA NOT NULL,     -- SHA-256(POST body), NOT UNIQUE
+    payload_type         VARCHAR(10) NOT NULL,
+    storage_mode         VARCHAR(20) NOT NULL,
+    original_filename    VARCHAR(255),
+    canonical_package_id BIGINT REFERENCES packages(id),
+    file_count           INT NOT NULL DEFAULT 0,
+    unpack_error         TEXT
+);
+
+CREATE TABLE package_files (
+    id                BIGSERIAL PRIMARY KEY,
+    package_id        BIGINT NOT NULL REFERENCES packages(id),
+    blob_hash         BYTEA NOT NULL REFERENCES content_blobs(content_hash),
+    role              VARCHAR(15) NOT NULL,  -- original | member | unpack_error
+    original_filename VARCHAR(255),
+    sequence_number   INT
+);
+```
+
+**Read path:** `file_id` → `package_files.blob_hash` → `content_blobs` → segment read → bytes клиенту.
+
+### 5.4.1. Устаревшая схема (xml_registry)
+
+<details>
+<summary>Legacy schema</summary>
 
 ```sql
 -- Реестр уникальных XML (один раз на уникальный контент)
@@ -520,9 +559,17 @@ CREATE TABLE supplier_stats (
 );
 ```
 
-## 6. Read/Write Path
+</details>
 
-### Write Path
+## 6. Read/Write Path (v1.2)
+
+**Write:** `POST /v1/packages` → `package_hash` lookup → clone refs **или** `StoreOrRef` blobs → PG transaction.
+
+**Read:** `GET /v1/packages/{id}/files/{file_id}` → `package_files` → `content_blobs` → segment.
+
+Клиент не видит dedup; duplicate POST всегда `201`.
+
+## 6.1. Read/Write Path (legacy diagram)
 
 ```
                     ┌──────────────────┐
@@ -1004,7 +1051,7 @@ Dictionary compression (5x): 20 байт × 100M = 2 GB
 | Coordinator DB | PostgreSQL 14+ (легковесный индекс) | etcd + custom index |
 | Bloom Filter | pybloom-live, bloom-filter2 | Cuckoo filter |
 | Compression | Zstd, LZ4 | Snappy, Brotli |
-| Hash Function | xxhash (XXH3-128) | MetroHash, FarmHash |
+| Hash Function | SHA-256 | xxhash (XXH3-128) |
 | Backup | restic, borg | rclone, rsync + zfs snapshots |
 
 ### C. Метрики для мониторинга

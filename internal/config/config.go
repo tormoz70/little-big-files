@@ -1,0 +1,94 @@
+package config
+
+import (
+	"os"
+	"strconv"
+	"time"
+)
+
+type Config struct {
+	DataDir            string
+	PGDSN              string
+	SegmentMaxSize     int64
+	ZipThresholdSize   int
+	ZipThresholdCount  int
+	MaxBodyBytes       int64
+	HTTPAddr           string
+	MigrationsPath     string
+	LargeZipAsyncUnpack bool
+	UnpackWorkers       int
+	UnpackQueueSize     int
+	WriteBufferMaxBytes int
+	WriteBufferInterval time.Duration
+	CompressionEnabled  bool
+	CompressionMinSize  int
+	ExamplesDir         string
+}
+
+func Load() Config {
+	return Config{
+		DataDir:           env("DATA_DIR", "./data/segments"),
+		PGDSN:             env("PG_DSN", "postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable"),
+		SegmentMaxSize:    envInt64("SEGMENT_MAX_SIZE", 4*1024*1024*1024),
+		ZipThresholdSize:  envInt("ZIP_THRESHOLD_SIZE", 102400),
+		ZipThresholdCount: envInt("ZIP_THRESHOLD_COUNT", 100),
+		MaxBodyBytes:      envInt64("MAX_BODY_BYTES", 64*1024*1024),
+		HTTPAddr:            env("HTTP_ADDR", ":8080"),
+		MigrationsPath:      env("MIGRATIONS_PATH", "./migrations"),
+		LargeZipAsyncUnpack: envBool("LARGE_ZIP_ASYNC_UNPACK", true),
+		UnpackWorkers:       envInt("UNPACK_WORKERS", 2),
+		UnpackQueueSize:     envInt("UNPACK_QUEUE_SIZE", 256),
+		WriteBufferMaxBytes: envInt("WRITE_BUFFER_MAX_BYTES", 4*1024*1024),
+		WriteBufferInterval: envDuration("WRITE_BUFFER_INTERVAL", 100*time.Millisecond),
+		CompressionEnabled:  envBool("COMPRESSION_ENABLED", true),
+		CompressionMinSize:  envInt("COMPRESSION_MIN_SIZE", 64),
+		ExamplesDir:         env("EXAMPLES_DIR", "./examples"),
+	}
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		d, err := time.ParseDuration(v)
+		if err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err == nil {
+			return b
+		}
+	}
+	return def
+}
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envInt64(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return def
+}
