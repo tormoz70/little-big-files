@@ -12,6 +12,7 @@ import (
 	"github.com/little-big-files/little-big-files/internal/api"
 	"github.com/little-big-files/little-big-files/internal/compress"
 	"github.com/little-big-files/little-big-files/internal/config"
+	"github.com/little-big-files/little-big-files/internal/dedup"
 	"github.com/little-big-files/little-big-files/internal/ingestion"
 	"github.com/little-big-files/little-big-files/internal/metadata"
 	"github.com/little-big-files/little-big-files/internal/storage"
@@ -55,7 +56,23 @@ func main() {
 		defer encoder.Close()
 	}
 
-	blobs := storage.NewBlobStore(segments, encoder)
+	dedupIdx, err := dedup.Open(cfg)
+	if err != nil {
+		slog.Error("dedup index open failed", "err", err)
+		os.Exit(1)
+	}
+	if dedupIdx != nil {
+		defer dedupIdx.Close()
+		if cfg.DedupRebuildOnStart {
+			if err := dedup.RebuildFromPG(ctx, dedupIdx, repo, cfg.BloomExpectedItems, cfg.BloomFalsePositive); err != nil {
+				slog.Error("dedup index rebuild failed", "err", err)
+				os.Exit(1)
+			}
+		}
+		slog.Info("dedup index enabled", "backend", dedupIdx.Backend())
+	}
+
+	blobs := storage.NewBlobStore(segments, encoder, dedupIdx)
 	ingest := ingestion.NewService(cfg, repo, blobs)
 
 	var unpackQ *ingestion.UnpackQueue

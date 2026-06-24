@@ -32,6 +32,11 @@ Environment:
 | `COMPRESSION_ENABLED` | `true` — Zstd dictionary compression for XML |
 | `COMPRESSION_MIN_SIZE` | `64` — minimum payload size to compress |
 | `EXAMPLES_DIR` | `./examples` — ZIP samples for dictionary training |
+| `DEDUP_BACKEND` | `memory` — `memory`, `postgres` (PG-only), `rocksdb` (needs `-tags rocksdb`) |
+| `ROCKSDB_PATH` | `./data/rocksdb` |
+| `BLOOM_EXPECTED_ITEMS` | `1000000` |
+| `BLOOM_FALSE_POSITIVE` | `0.001` |
+| `DEDUP_REBUILD_ON_START` | `true` — reload Bloom+index from `content_blobs` |
 
 ## Build & test
 

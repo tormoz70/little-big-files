@@ -23,6 +23,11 @@ type Config struct {
 	CompressionEnabled  bool
 	CompressionMinSize  int
 	ExamplesDir         string
+	DedupBackend        string
+	RocksDBPath         string
+	BloomExpectedItems  uint
+	BloomFalsePositive  float64
+	DedupRebuildOnStart bool
 }
 
 func Load() Config {
@@ -43,6 +48,11 @@ func Load() Config {
 		CompressionEnabled:  envBool("COMPRESSION_ENABLED", true),
 		CompressionMinSize:  envInt("COMPRESSION_MIN_SIZE", 64),
 		ExamplesDir:         env("EXAMPLES_DIR", "./examples"),
+		DedupBackend:        env("DEDUP_BACKEND", "memory"),
+		RocksDBPath:         env("ROCKSDB_PATH", "./data/rocksdb"),
+		BloomExpectedItems:  uint(envInt("BLOOM_EXPECTED_ITEMS", 1_000_000)),
+		BloomFalsePositive:  envFloat("BLOOM_FALSE_POSITIVE", 0.001),
+		DedupRebuildOnStart: envBool("DEDUP_REBUILD_ON_START", true),
 	}
 }
 
@@ -86,6 +96,16 @@ func envInt(key string, def int) int {
 func envInt64(key string, def int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
 		if err == nil {
 			return n
 		}

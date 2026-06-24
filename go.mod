@@ -3,13 +3,16 @@ module github.com/little-big-files/little-big-files
 go 1.22
 
 require (
+	github.com/bits-and-blooms/bloom/v3 v3.7.1
 	github.com/go-chi/chi/v5 v5.2.1
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/klauspost/compress v1.17.11
-	github.com/stretchr/testify v1.10.0
+	github.com/linxGnu/grocksdb v1.10.8
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
+	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

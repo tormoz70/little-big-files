@@ -9,14 +9,17 @@ import (
 )
 
 // persistZipMembers adds member or unpack_error rows after original already exists.
-func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, members []ZipMember, unpackErr error) (fileCount int, unpackErrText *string, err error) {
+func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, members []ZipMember, unpackErr error, counters *ingestCounters) (fileCount int, unpackErrText *string, err error) {
 	if unpackErr != nil {
 		msg := unpackErr.Error()
 		unpackErrText = &msg
 		errBytes := []byte(msg)
-		errHash, err := blobs.StoreOrRef(ctx, tx, errBytes, storage.RecordError)
+		errHash, created, err := blobs.StoreOrRef(ctx, tx, errBytes, storage.RecordError)
 		if err != nil {
 			return 0, nil, err
+		}
+		if counters != nil {
+			counters.add(created)
 		}
 		errName := unpackErrorFilename
 		if _, err := tx.CreatePackageFile(ctx, packageID, metadata.CreateFileInput{
@@ -30,9 +33,12 @@ func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobS
 	}
 
 	for i, m := range members {
-		memberHash, err := blobs.StoreOrRef(ctx, tx, m.Data, storage.RecordXML)
+		memberHash, created, err := blobs.StoreOrRef(ctx, tx, m.Data, storage.RecordXML)
 		if err != nil {
 			return 0, nil, err
+		}
+		if counters != nil {
+			counters.add(created)
 		}
 		seq := i
 		name := m.Filename
@@ -88,7 +94,7 @@ func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error
 	var unpackErrText *string
 	err = s.repo.WithTx(ctx, func(tx metadata.Tx) error {
 		// Re-check under transaction via fresh read would be ideal; accept rare double-unpack race for v1.
-		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, members, unpackErr)
+		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, members, unpackErr, nil)
 		if err != nil {
 			return err
 		}

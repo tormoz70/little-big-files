@@ -60,6 +60,18 @@ func (tx *memTx) IncrementRefCounts(ctx context.Context, hashes [][]byte) error 
 	return nil
 }
 
+func (tx *memTx) IncrementRefCountIfExists(ctx context.Context, hash []byte) (bool, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	b, ok := tx.blobs[blobKey(hash)]
+	if !ok {
+		return false, nil
+	}
+	b.RefCount++
+	tx.blobs[blobKey(hash)] = b
+	return true, nil
+}
+
 func (tx *memTx) CreatePackage(ctx context.Context, in metadata.CreatePackageInput) (int64, error) {
 	return 0, nil
 }
@@ -95,13 +107,14 @@ func TestBlobStoreCompressionRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer enc.Close()
 
-	blobs := storage.NewBlobStore(sm, enc)
+	blobs := storage.NewBlobStore(sm, enc, nil)
 	tx := newMemTx()
 	ctx := context.Background()
 
 	original := samples[0]
-	hash, err := blobs.StoreOrRef(ctx, tx, original, storage.RecordXML)
+	hash, created, err := blobs.StoreOrRef(ctx, tx, original, storage.RecordXML)
 	require.NoError(t, err)
+	require.True(t, created)
 	require.Equal(t, storage.ContentHash(original), hash)
 
 	blob, err := tx.GetBlob(ctx, hash)

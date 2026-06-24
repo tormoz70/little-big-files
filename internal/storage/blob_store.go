@@ -7,16 +7,18 @@ import (
 	"time"
 
 	"github.com/little-big-files/little-big-files/internal/compress"
+	"github.com/little-big-files/little-big-files/internal/dedup"
 	"github.com/little-big-files/little-big-files/internal/metadata"
 )
 
 type BlobStore struct {
 	segments *SegmentManager
 	encoder  *compress.Encoder
+	index    *dedup.HotIndex
 }
 
-func NewBlobStore(segments *SegmentManager, encoder *compress.Encoder) *BlobStore {
-	return &BlobStore{segments: segments, encoder: encoder}
+func NewBlobStore(segments *SegmentManager, encoder *compress.Encoder, index *dedup.HotIndex) *BlobStore {
+	return &BlobStore{segments: segments, encoder: encoder, index: index}
 }
 
 func ContentHash(data []byte) []byte {
@@ -40,24 +42,45 @@ func (b *BlobStore) encodeRecord(data []byte, recordType RecordType) []byte {
 	return EncodeRecord(magic, payload)
 }
 
-// StoreOrRef persists new content or increments ref_count for existing blob.
-func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte, recordType RecordType) ([]byte, error) {
+// StoreOrRef persists new content or increments ref_count for an existing blob.
+// The second return value is true when a new blob was written.
+func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte, recordType RecordType) ([]byte, bool, error) {
 	hash := ContentHash(data)
+
+	if b.index != nil && !b.index.MightContain(hash) {
+		return b.storeNew(ctx, tx, hash, data, recordType)
+	}
+
+	if b.index != nil {
+		if _, ok := b.index.Lookup(hash); ok {
+			if updated, err := tx.IncrementRefCountIfExists(ctx, hash); err != nil {
+				return nil, false, err
+			} else if updated {
+				return hash, false, nil
+			}
+		}
+	}
+
 	existing, err := tx.GetBlob(ctx, hash)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if existing != nil {
 		if err := tx.IncrementRefCount(ctx, hash); err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return hash, nil
+		_ = b.indexPut(hash, *existing)
+		return hash, false, nil
 	}
 
+	return b.storeNew(ctx, tx, hash, data, recordType)
+}
+
+func (b *BlobStore) storeNew(ctx context.Context, tx metadata.Tx, hash, data []byte, recordType RecordType) ([]byte, bool, error) {
 	record := b.encodeRecord(data, recordType)
 	loc, err := b.segments.Append(record)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	blob := metadata.ContentBlob{
@@ -69,9 +92,23 @@ func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte,
 		FirstSeenAt: time.Now().UTC(),
 	}
 	if err := tx.InsertBlob(ctx, blob); err != nil {
-		return nil, fmt.Errorf("insert blob: %w", err)
+		return nil, false, fmt.Errorf("insert blob: %w", err)
 	}
-	return hash, nil
+	if err := b.indexPut(hash, blob); err != nil {
+		return nil, false, err
+	}
+	return hash, true, nil
+}
+
+func (b *BlobStore) indexPut(hash []byte, blob metadata.ContentBlob) error {
+	if b.index == nil {
+		return nil
+	}
+	return b.index.Put(hash, dedup.Entry{
+		SegmentID: blob.SegmentID,
+		Offset:    blob.Offset,
+		Size:      blob.Size,
+	})
 }
 
 func (b *BlobStore) ReadBlob(blob metadata.ContentBlob) ([]byte, error) {

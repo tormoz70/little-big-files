@@ -56,10 +56,26 @@ type CreateFileInput struct {
 	SequenceNumber   *int
 }
 
+type SupplierStats struct {
+	SupplierID     int
+	TotalPackages  int64
+	TotalRefs      int64
+	DuplicateRefs  int64
+	LastActivity   time.Time
+}
+
+func (s SupplierStats) DedupRatio() float64 {
+	if s.TotalRefs == 0 {
+		return 0
+	}
+	return float64(s.DuplicateRefs) / float64(s.TotalRefs)
+}
+
 type Tx interface {
 	GetBlob(ctx context.Context, hash []byte) (*ContentBlob, error)
 	InsertBlob(ctx context.Context, blob ContentBlob) error
 	IncrementRefCount(ctx context.Context, hash []byte) error
+	IncrementRefCountIfExists(ctx context.Context, hash []byte) (bool, error)
 	IncrementRefCounts(ctx context.Context, hashes [][]byte) error
 	CreatePackage(ctx context.Context, in CreatePackageInput) (int64, error)
 	CreatePackageFile(ctx context.Context, packageID int64, in CreateFileInput) (int64, error)
@@ -80,4 +96,7 @@ type Repository interface {
 	ListClonePackageIDs(ctx context.Context, canonicalID int64) ([]int64, error)
 	GetLatestDictionary(ctx context.Context) ([]byte, int, error)
 	SaveDictionary(ctx context.Context, dict []byte, entryCount int) error
+	ListContentBlobs(ctx context.Context) ([]ContentBlob, error)
+	RecordSupplierIngest(ctx context.Context, supplierID, fileCount, newBlobs, duplicateRefs int) error
+	GetSupplierStats(ctx context.Context, supplierID int) (*SupplierStats, error)
 }

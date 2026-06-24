@@ -105,6 +105,14 @@ func (t *pgTx) IncrementRefCount(ctx context.Context, hash []byte) error {
 	return err
 }
 
+func (t *pgTx) IncrementRefCountIfExists(ctx context.Context, hash []byte) (bool, error) {
+	tag, err := t.tx.Exec(ctx, `UPDATE content_blobs SET ref_count = ref_count + 1 WHERE content_hash = $1`, hash)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (t *pgTx) IncrementRefCounts(ctx context.Context, hashes [][]byte) error {
 	for _, h := range hashes {
 		if err := t.IncrementRefCount(ctx, h); err != nil {
@@ -350,4 +358,56 @@ func (r *PostgresRepository) SaveDictionary(ctx context.Context, dict []byte, en
 		INSERT INTO compression_dictionary (dict_data, entry_count) VALUES ($1, $2)`,
 		dict, entryCount)
 	return err
+}
+
+func (r *PostgresRepository) ListContentBlobs(ctx context.Context) ([]ContentBlob, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT content_hash, size, segment_id, offset, ref_count, first_seen_at
+		FROM content_blobs ORDER BY first_seen_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ContentBlob
+	for rows.Next() {
+		var b ContentBlob
+		if err := rows.Scan(&b.ContentHash, &b.Size, &b.SegmentID, &b.Offset, &b.RefCount, &b.FirstSeenAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepository) RecordSupplierIngest(ctx context.Context, supplierID, fileCount, newBlobs, duplicateRefs int) error {
+	dup := duplicateRefs
+	if dup < 0 {
+		dup = 0
+	}
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO supplier_stats (supplier_id, total_packages, total_refs, duplicate_refs, last_activity)
+		VALUES ($1, 1, $2, $3, NOW())
+		ON CONFLICT (supplier_id) DO UPDATE SET
+			total_packages = supplier_stats.total_packages + 1,
+			total_refs = supplier_stats.total_refs + EXCLUDED.total_refs,
+			duplicate_refs = supplier_stats.duplicate_refs + EXCLUDED.duplicate_refs,
+			last_activity = NOW()`,
+		supplierID, fileCount, dup)
+	return err
+}
+
+func (r *PostgresRepository) GetSupplierStats(ctx context.Context, supplierID int) (*SupplierStats, error) {
+	row := r.pool.QueryRow(ctx, `
+		SELECT supplier_id, total_packages, total_refs, duplicate_refs, last_activity
+		FROM supplier_stats WHERE supplier_id = $1`, supplierID)
+	var s SupplierStats
+	err := row.Scan(&s.SupplierID, &s.TotalPackages, &s.TotalRefs, &s.DuplicateRefs, &s.LastActivity)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
 }

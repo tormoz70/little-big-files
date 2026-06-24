@@ -63,7 +63,12 @@ func (s *Service) ProcessPackage(ctx context.Context, supplierID int, body []byt
 		return nil, err
 	}
 	if canonicalID != nil {
-		return s.clonePackage(ctx, supplierID, pkgHash, payloadType, filename, *canonicalID)
+		pkg, err := s.clonePackage(ctx, supplierID, pkgHash, payloadType, filename, *canonicalID)
+		if err != nil {
+			return nil, err
+		}
+		s.recordIngest(ctx, supplierID, pkg.FileCount, ingestCounters{}, true)
+		return pkg, nil
 	}
 
 	switch payloadType {
@@ -126,11 +131,13 @@ func (s *Service) clonePackage(ctx context.Context, supplierID int, pkgHash []by
 
 func (s *Service) ingestXML(ctx context.Context, supplierID int, pkgHash, body []byte, filename *string) (*metadata.Package, error) {
 	var packageID int64
+	var counters ingestCounters
 	err := s.repo.WithTx(ctx, func(tx metadata.Tx) error {
-		hash, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordXML)
+		hash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordXML)
 		if err != nil {
 			return err
 		}
+		counters.add(created)
 		id, err := tx.CreatePackage(ctx, metadata.CreatePackageInput{
 			SupplierID:       supplierID,
 			PackageHash:      pkgHash,
@@ -153,6 +160,7 @@ func (s *Service) ingestXML(ctx context.Context, supplierID int, pkgHash, body [
 	if err != nil {
 		return nil, err
 	}
+	s.recordIngest(ctx, supplierID, 1, counters, false)
 	return s.repo.GetPackage(ctx, packageID)
 }
 
@@ -173,11 +181,13 @@ func (s *Service) ingestZIP(ctx context.Context, supplierID int, pkgHash, body [
 
 func (s *Service) ingestLargeZIP(ctx context.Context, supplierID int, pkgHash, body []byte, filename *string) (*metadata.Package, error) {
 	var packageID int64
+	var counters ingestCounters
 	err := s.repo.WithTx(ctx, func(tx metadata.Tx) error {
-		hash, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP)
+		hash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP)
 		if err != nil {
 			return err
 		}
+		counters.add(created)
 		id, err := tx.CreatePackage(ctx, metadata.CreatePackageInput{
 			SupplierID:       supplierID,
 			PackageHash:      pkgHash,
@@ -200,6 +210,7 @@ func (s *Service) ingestLargeZIP(ctx context.Context, supplierID int, pkgHash, b
 	if err != nil {
 		return nil, err
 	}
+	s.recordIngest(ctx, supplierID, 1, counters, false)
 	if s.cfg.LargeZipAsyncUnpack && s.unpackQueue != nil {
 		s.unpackQueue.Enqueue(packageID)
 	}
@@ -219,11 +230,13 @@ func (s *Service) ingestSmallZIP(ctx context.Context, supplierID int, pkgHash, b
 	}
 
 	var packageID int64
+	var counters ingestCounters
 	err := s.repo.WithTx(ctx, func(tx metadata.Tx) error {
-		zipHash, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP)
+		zipHash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP)
 		if err != nil {
 			return err
 		}
+		counters.add(created)
 		id, err := tx.CreatePackage(ctx, metadata.CreatePackageInput{
 			SupplierID:       supplierID,
 			PackageHash:      pkgHash,
@@ -247,11 +260,12 @@ func (s *Service) ingestSmallZIP(ctx context.Context, supplierID int, pkgHash, b
 			return err
 		}
 
-		_, _, err = persistZipMembers(ctx, tx, s.blobs, packageID, members, unpackErr)
+		_, _, err = persistZipMembers(ctx, tx, s.blobs, packageID, members, unpackErr, &counters)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
+	s.recordIngest(ctx, supplierID, fileCount, counters, false)
 	return s.repo.GetPackage(ctx, packageID)
 }

@@ -16,6 +16,7 @@ type MemoryRepository struct {
 	blobs   map[string]metadata.ContentBlob
 	pkgs    map[int64]metadata.Package
 	files   map[int64]metadata.PackageFile
+	stats   map[int]metadata.SupplierStats
 	nextPkg int64
 	nextFile int64
 }
@@ -25,6 +26,7 @@ func NewMemoryRepository() *MemoryRepository {
 		blobs:    make(map[string]metadata.ContentBlob),
 		pkgs:     make(map[int64]metadata.Package),
 		files:    make(map[int64]metadata.PackageFile),
+		stats:    make(map[int]metadata.SupplierStats),
 		nextPkg:  1,
 		nextFile: 1,
 	}
@@ -69,6 +71,17 @@ func (t *memTx) IncrementRefCount(ctx context.Context, hash []byte) error {
 	b.RefCount++
 	t.repo.blobs[k] = b
 	return nil
+}
+
+func (t *memTx) IncrementRefCountIfExists(ctx context.Context, hash []byte) (bool, error) {
+	k := key(hash)
+	b, ok := t.repo.blobs[k]
+	if !ok {
+		return false, nil
+	}
+	b.RefCount++
+	t.repo.blobs[k] = b
+	return true, nil
 }
 
 func (t *memTx) IncrementRefCounts(ctx context.Context, hashes [][]byte) error {
@@ -242,6 +255,40 @@ func (r *MemoryRepository) GetLatestDictionary(ctx context.Context) ([]byte, int
 
 func (r *MemoryRepository) SaveDictionary(ctx context.Context, dict []byte, entryCount int) error {
 	return nil
+}
+
+func (r *MemoryRepository) ListContentBlobs(ctx context.Context) ([]metadata.ContentBlob, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]metadata.ContentBlob, 0, len(r.blobs))
+	for _, b := range r.blobs {
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+func (r *MemoryRepository) RecordSupplierIngest(ctx context.Context, supplierID, fileCount, newBlobs, duplicateRefs int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.stats[supplierID]
+	s.SupplierID = supplierID
+	s.TotalPackages++
+	s.TotalRefs += int64(fileCount)
+	s.DuplicateRefs += int64(duplicateRefs)
+	s.LastActivity = time.Now().UTC()
+	r.stats[supplierID] = s
+	return nil
+}
+
+func (r *MemoryRepository) GetSupplierStats(ctx context.Context, supplierID int) (*metadata.SupplierStats, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.stats[supplierID]
+	if !ok {
+		return nil, nil
+	}
+	cp := s
+	return &cp, nil
 }
 
 // PostgresAdapter wraps MemoryRepository for API server expecting *PostgresRepository.
