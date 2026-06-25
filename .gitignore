@@ -1,0 +1,14 @@
+# Python caches and virtual environments
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+clients/python/.venv/
+
+# Local load-test logs
+clients/python/logs/
+
+# Coverage and temporary debug artifacts
+coverage.out
+tmp-panel*.png
+
