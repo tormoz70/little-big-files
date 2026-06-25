@@ -48,6 +48,9 @@ func TestCoordinatorHandlerIncludesCoordinatorMetrics(t *testing.T) {
 		{ShardID: 0, State: "active", TotalBytes: 123},
 		{ShardID: 1, State: "standby", TotalBytes: 0},
 	}, 52_428_800)
+	metrics.SetCoordinatorShardUp("0", "active", true)
+	metrics.SetCoordinatorShardUp("1", "standby", false)
+	metrics.IncCoordinatorShardFailures("1", "check")
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -57,6 +60,9 @@ func TestCoordinatorHandlerIncludesCoordinatorMetrics(t *testing.T) {
 	require.Contains(t, body, `lbf_coordinator_shard_info{shard_id="0",state="active"} 1`)
 	require.Contains(t, body, `lbf_coordinator_shard_bar_bytes{shard_id="0",state="active"} 123`)
 	require.Contains(t, body, `lbf_coordinator_shard_bar_bytes{shard_id="1",state="standby"} 0`)
+	require.Contains(t, body, `lbf_coordinator_shard_up{shard_id="0",state="active"} 1`)
+	require.Contains(t, body, `lbf_coordinator_shard_up{shard_id="1",state="standby"} 0`)
+	require.Contains(t, body, `lbf_coordinator_shard_failures_total{op="check",shard_id="1"}`)
 }
 
 func TestCoordinatorBarBytesShowsLastFourShards(t *testing.T) {

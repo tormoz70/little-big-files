@@ -32,11 +32,17 @@ type Config struct {
 	ShardID             int
 	ShardRole           string // primary | replica
 	ShardReadOnly       bool
+	ShardUUID           string
+	ShardClusterKey     string
+	ShardAdvertiseURL   string
+	ShardStartupState   string
+	CoordinatorURL      string
 	// Coordinator (F4)
-	CoordinatorPGDSN    string
-	ShardMaxBytes       int64
-	SealCheckInterval   time.Duration
+	CoordinatorPGDSN     string
+	ShardMaxBytes        int64
+	SealCheckInterval    time.Duration
 	CoordinatorBootstrap string // shard registry bootstrap file or inline
+	ClusterKey           string
 }
 
 func Load() Config {
@@ -65,10 +71,16 @@ func Load() Config {
 		ShardID:             envInt("SHARD_ID", 0),
 		ShardRole:           env("SHARD_ROLE", "primary"),
 		ShardReadOnly:       envBool("SHARD_READ_ONLY", false),
+		ShardUUID:           env("SHARD_UUID", ""),
+		ShardClusterKey:     env("SHARD_CLUSTER_KEY", ""),
+		ShardAdvertiseURL:   env("SHARD_ADVERTISE_URL", ""),
+		ShardStartupState:   env("SHARD_STARTUP_STATE", "standby"),
+		CoordinatorURL:      env("COORDINATOR_URL", ""),
 		CoordinatorPGDSN:    env("COORDINATOR_PG_DSN", "postgres://lbf:lbf@localhost:5433/coordinator?sslmode=disable"),
 		ShardMaxBytes:       envInt64("SHARD_MAX_BYTES", 500*1024*1024*1024),
 		SealCheckInterval:   envDuration("SEAL_CHECK_INTERVAL", 30*time.Second),
 		CoordinatorBootstrap: env("COORDINATOR_BOOTSTRAP", "./deploy/shards.bootstrap.json"),
+		ClusterKey:           env("CLUSTER_KEY", ""),
 	}
 }
 

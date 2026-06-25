@@ -12,6 +12,7 @@ import (
 	"github.com/little-big-files/little-big-files/internal/api"
 	"github.com/little-big-files/little-big-files/internal/compress"
 	"github.com/little-big-files/little-big-files/internal/config"
+	"github.com/little-big-files/little-big-files/internal/coordinator"
 	"github.com/little-big-files/little-big-files/internal/dedup"
 	"github.com/little-big-files/little-big-files/internal/ingestion"
 	"github.com/little-big-files/little-big-files/internal/metadata"
@@ -99,6 +100,44 @@ func main() {
 		defer unpackQ.Shutdown()
 	}
 
+	if cfg.ShardRole == "primary" && cfg.CoordinatorURL != "" {
+		if cfg.ShardUUID == "" {
+			slog.Error("SHARD_UUID is required when COORDINATOR_URL is set")
+			os.Exit(1)
+		}
+		if cfg.ShardClusterKey == "" {
+			slog.Error("SHARD_CLUSTER_KEY is required when COORDINATOR_URL is set")
+			os.Exit(1)
+		}
+		if cfg.ShardAdvertiseURL == "" {
+			slog.Error("SHARD_ADVERTISE_URL is required when COORDINATOR_URL is set")
+			os.Exit(1)
+		}
+		startupState := cfg.ShardStartupState
+		if startupState == "" {
+			startupState = string(coordinator.ShardStandby)
+		}
+		resp, err := coordinator.RegisterShardWithRetry(ctx, cfg.CoordinatorURL, coordinator.RegisterShardRequest{
+			ShardUUID:    cfg.ShardUUID,
+			ClusterKey:   cfg.ShardClusterKey,
+			PrimaryURL:   cfg.ShardAdvertiseURL,
+			StartupState: startupState,
+		})
+		if err != nil {
+			slog.Error("shard registration failed", "err", err)
+			os.Exit(1)
+		}
+		cfg.ShardID = resp.Shard.ShardID
+		if resp.Shard.State == coordinator.ShardSealed {
+			cfg.ShardReadOnly = true
+		}
+		slog.Info("shard registered in coordinator",
+			"shard_uuid", cfg.ShardUUID,
+			"shard_id", cfg.ShardID,
+			"state", resp.Shard.State,
+			"registered", resp.Registered)
+	}
+
 	srv := api.NewShardServer(cfg, ingest, repo, blobs, segments)
 	if guard := srv.ShardGuard(); guard != nil {
 		var blobStats metrics.BlobByteTotalsProvider
@@ -116,7 +155,7 @@ func main() {
 	}
 
 	go func() {
-	slog.Info("listening", "addr", cfg.HTTPAddr, "shard_id", cfg.ShardID, "role", cfg.ShardRole)
+		slog.Info("listening", "addr", cfg.HTTPAddr, "shard_id", cfg.ShardID, "role", cfg.ShardRole)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "err", err)
 			os.Exit(1)

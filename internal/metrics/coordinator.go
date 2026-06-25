@@ -49,6 +49,20 @@ var (
 		},
 		[]string{"shard_id", "state"},
 	)
+	CoordinatorShardUp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "lbf_coordinator_shard_up",
+			Help: "Shard availability from coordinator perspective (1=up, 0=down)",
+		},
+		[]string{"shard_id", "state"},
+	)
+	CoordinatorShardFailures = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "lbf_coordinator_shard_failures_total",
+			Help: "Coordinator-side shard access failures by operation",
+		},
+		[]string{"shard_id", "op"},
+	)
 )
 
 func init() {
@@ -58,6 +72,8 @@ func init() {
 		CoordinatorActiveShard,
 		CoordinatorShardMaxBytes,
 		CoordinatorShardBarBytes,
+		CoordinatorShardUp,
+		CoordinatorShardFailures,
 	)
 }
 
@@ -107,6 +123,18 @@ func SetCoordinatorShards(shards []ShardSnapshot, maxBytes int64) {
 		CoordinatorActiveShard.Set(activeID)
 	}
 	CoordinatorShardMaxBytes.Set(float64(maxBytes))
+}
+
+func SetCoordinatorShardUp(shardID, state string, up bool) {
+	value := 0.0
+	if up {
+		value = 1
+	}
+	CoordinatorShardUp.WithLabelValues(shardID, state).Set(value)
+}
+
+func IncCoordinatorShardFailures(shardID, op string) {
+	CoordinatorShardFailures.WithLabelValues(shardID, op).Inc()
 }
 
 func recentShardWindow(shards []ShardSnapshot, limit int) []ShardSnapshot {

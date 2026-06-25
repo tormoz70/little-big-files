@@ -2,11 +2,14 @@ package coordinator
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -35,7 +38,9 @@ func (s *Server) Router() http.Handler {
 	r.Get("/v1/packages/{id}/original", s.getOriginal)
 
 	r.Get("/v1/admin/shards", s.listShards)
+	r.Post("/v1/admin/shards", s.registerShard)
 	r.Post("/v1/admin/seal-rotate", s.sealRotate)
+	r.Patch("/v1/admin/shards/{id}/state", s.patchShardState)
 	r.Handle("/metrics", metrics.CoordinatorHandler())
 	return r
 }
@@ -58,6 +63,11 @@ func (s *Server) postPackage(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
 	data, status, err := s.registry.ProxyPost(r.Context(), supplierID, body, filename)
 	if err != nil {
+		var statusErr *StatusError
+		if errors.As(err, &statusErr) {
+			writeJSON(w, statusErr.Status, map[string]string{"error": statusErr.Code})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -74,6 +84,11 @@ func (s *Server) getPackage(w http.ResponseWriter, r *http.Request) {
 	}
 	data, status, ct, err := s.registry.ProxyGet(r.Context(), id, "")
 	if err != nil {
+		var statusErr *StatusError
+		if errors.As(err, &statusErr) {
+			writeJSON(w, statusErr.Status, map[string]string{"error": statusErr.Code})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -89,6 +104,11 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
 	fileID := chi.URLParam(r, "file_id")
 	data, status, ct, err := s.registry.ProxyGet(r.Context(), id, "/files/"+fileID)
 	if err != nil {
+		var statusErr *StatusError
+		if errors.As(err, &statusErr) {
+			writeJSON(w, statusErr.Status, map[string]string{"error": statusErr.Code})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -103,6 +123,11 @@ func (s *Server) getOriginal(w http.ResponseWriter, r *http.Request) {
 	}
 	data, status, ct, err := s.registry.ProxyGet(r.Context(), id, "/original")
 	if err != nil {
+		var statusErr *StatusError
+		if errors.As(err, &statusErr) {
+			writeJSON(w, statusErr.Status, map[string]string{"error": statusErr.Code})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -124,6 +149,91 @@ func (s *Server) sealRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "rotated"})
+}
+
+func (s *Server) registerShard(w http.ResponseWriter, r *http.Request) {
+	var req RegisterShardRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if err := s.validateClusterKey(req.ClusterKey); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	if !isUUID(req.ShardUUID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid shard_uuid"})
+		return
+	}
+	if strings.TrimSpace(req.PrimaryURL) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "primary_url is required"})
+		return
+	}
+	state := ShardStandby
+	if strings.TrimSpace(req.StartupState) != "" {
+		parsed, err := ParseShardState(req.StartupState)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if parsed == ShardSealed {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "startup_state cannot be sealed"})
+			return
+		}
+		state = parsed
+	}
+	shard, created, err := s.registry.RegisterShard(r.Context(), req.ShardUUID, state, req.PrimaryURL, req.ReplicaURL)
+	if err != nil {
+		if errors.Is(err, ErrStateConflict) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, RegisterShardResponse{
+		Shard:      *shard,
+		Registered: created,
+	})
+}
+
+func (s *Server) patchShardState(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid shard id"})
+		return
+	}
+	var req PatchShardStateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if err := s.validateClusterKey(req.ClusterKey); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	state, err := ParseShardState(req.State)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	shard, err := s.registry.PatchShardState(r.Context(), id, state, req.Confirm)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrShardNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, ErrStateConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, shard)
 }
 
 func (s *Server) RunSealLoop(ctx context.Context) {
@@ -185,4 +295,35 @@ func writeRaw(w http.ResponseWriter, status int, ct string, data []byte) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(data)
+}
+
+func (s *Server) validateClusterKey(provided string) error {
+	expected := strings.TrimSpace(s.cfg.ClusterKey)
+	if expected == "" {
+		return errStr("cluster key is not configured")
+	}
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		return errStr("invalid cluster key")
+	}
+	return nil
+}
+
+func isUUID(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if len(v) != 36 {
+		return false
+	}
+	for i, ch := range v {
+		switch i {
+		case 8, 13, 18, 23:
+			if ch != '-' {
+				return false
+			}
+		default:
+			if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+				return false
+			}
+		}
+	}
+	return true
 }

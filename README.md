@@ -69,15 +69,26 @@ Ten test suppliers (`1001`–`1010`), example ZIPs from `examples/`. Grafana `:3
 | Variable | Default | Role |
 |----------|---------|------|
 | `COORDINATOR_PG_DSN` | coordinator PG | Global index |
+| `CLUSTER_KEY` | unset | Shared secret for shard registration/admin mutation |
 | `COORDINATOR_BOOTSTRAP` | `./deploy/shards.bootstrap.json` | Shard registry |
 | `SHARD_MAX_BYTES` | 500 GB | Seal trigger |
 | `SEAL_CHECK_INTERVAL` | `30s` | Auto seal poll |
 | `SHARD_ID` | `0` | Shard instance id |
 | `SHARD_ROLE` | `primary` | `primary` / `replica` |
 | `SHARD_READ_ONLY` | `false` | Sealed / replica writes blocked |
+| `SHARD_UUID` | unset | Stable shard identity for startup registration |
+| `SHARD_CLUSTER_KEY` | unset | Cluster key sent by shard to coordinator |
+| `SHARD_ADVERTISE_URL` | unset | Coordinator-facing URL for this shard |
+| `SHARD_STARTUP_STATE` | `standby` | Desired initial state on first registration |
+| `COORDINATOR_URL` | unset | Coordinator base URL for shard auto-registration |
 | `SYNC_PRIMARY_URL` | — | Replica segment sync source (shard-sync) |
 
 Architecture: clients → **Coordinator :8080** → active shard primary. Reads from sealed shards use **replica_url** when set in bootstrap; otherwise the sealed **primary** serves reads.
+
+Hot-add and manual switching API:
+
+- `POST /v1/admin/shards` — shard startup registration / idempotent upsert by `shard_uuid`
+- `PATCH /v1/admin/shards/{id}/state` — safe manual state transition (`standby -> active` requires `confirm=true`)
 
 **Подробное описание стенда:** [docs/test-stand.md](docs/test-stand.md) — VM, контейнеры, сценарии проверки, seal, troubleshooting.
 

@@ -264,7 +264,34 @@ curl -X POST http://localhost:8080/v1/admin/seal-rotate
 
 После ротации новые POST идут на shard 1; чтение старых пакетов — по global_id с shard_id=0 (sealed, через replica).
 
-### 5.4. Зеркалирование (MVP стенда)
+### 5.4. Hot-add и ручной state switch через API
+
+Регистрация shard (идемпотентно по `shard_uuid`):
+
+```bash
+curl -s -X POST http://localhost:8080/v1/admin/shards \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cluster_key": "lbf-local-cluster-key",
+    "shard_uuid": "33333333-3333-3333-3333-333333333333",
+    "primary_url": "http://shard-3-primary:8080",
+    "startup_state": "standby"
+  }' | jq .
+```
+
+Ручное переключение standby -> active (с подтверждением):
+
+```bash
+curl -s -X PATCH http://localhost:8080/v1/admin/shards/3/state \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cluster_key": "lbf-local-cluster-key",
+    "state": "active",
+    "confirm": true
+  }' | jq .
+```
+
+### 5.5. Зеркалирование (MVP стенда)
 
 | Слой | Механизм на стенде | Prod (TODO) |
 |------|-------------------|-------------|
@@ -316,6 +343,7 @@ curl -s -X POST "http://localhost:8080/v1/packages?supplier_id=1" \
 | `COORDINATOR_PG_DSN` | `postgres://lbf:lbf@coordinator-db:5432/coordinator?...` | PG Coordinator |
 | `COORDINATOR_BOOTSTRAP` | `/app/deploy/shards.bootstrap.json` | Начальный реестр шардов |
 | `COORDINATOR_MIGRATIONS_PATH` | `/app/migrations/coordinator` | SQL миграции |
+| `CLUSTER_KEY` | `lbf-...` | Общий ключ для регистрации shard и mutating admin API |
 | `SHARD_MAX_BYTES` | `1073741824` (1 GB) | Порог seal |
 | `SEAL_CHECK_INTERVAL` | `30s` | Период опроса stats active шарда |
 | `MAX_BODY_BYTES` | `67108864` (64 MB) | Лимит тела POST |
@@ -327,6 +355,11 @@ curl -s -X POST "http://localhost:8080/v1/packages?supplier_id=1" \
 | `SHARD_ID` | 0 или 1 | то же |
 | `SHARD_ROLE` | `primary` | `replica` |
 | `SHARD_READ_ONLY` | `false` | `true` |
+| `SHARD_UUID` | UUID шарда | обычно не используется на replica |
+| `SHARD_CLUSTER_KEY` | `lbf-...` | общий ключ кластера |
+| `SHARD_ADVERTISE_URL` | URL primary shard | — |
+| `SHARD_STARTUP_STATE` | `active`/`standby` | — |
+| `COORDINATOR_URL` | `http://coordinator:8080` | — |
 | `PG_DSN` | shard-N-db | **тот же** (MVP) |
 | `DATA_DIR` | `/data/segments` | отдельный volume |
 | `DEDUP_BACKEND` | `memory` | `memory` |
@@ -537,6 +570,7 @@ docker compose -f deploy/docker-compose.sharded.yml down -v
 | `no active shard` | Пустой shard_registry | Проверить bootstrap JSON, перезапустить coordinator |
 | GET 404 после seal | Replica segments не synced | `docker compose logs shard-0-sync`, проверить volumes |
 | Seal не срабатывает | `total_bytes < SHARD_MAX_BYTES` | Уменьшить `SHARD_MAX_BYTES` или POST `/admin/seal-rotate` |
+| `active_shard_unavailable` (POST 503) | active shard недоступен по сети | Проверить `primary_url`, `GET /v1/internal/stats`, затем выполнить manual switch через `PATCH /v1/admin/shards/{id}/state` |
 | Duplicate POST медленный | Dedup memory + PG | Для нагрузки — RocksDB backend |
 | Coordinator не стартует | PG not ready | Дождаться healthcheck coordinator-db |
 

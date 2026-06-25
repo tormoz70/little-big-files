@@ -51,6 +51,7 @@
 | `HTTP_ADDR` | `:8080` | API |
 | `COORDINATOR_PG_DSN` | `postgres://.../coordinator` | отдельная БД coordinator |
 | `COORDINATOR_BOOTSTRAP` | путь к `shards.pilot.json` | реестр шардов |
+| `CLUSTER_KEY` | `...` | общий ключ для startup registration и mutating admin API |
 | `SHARD_MAX_BYTES` | `107374182400` (100 GB) | порог seal |
 | `SEAL_CHECK_INTERVAL` | `30s`-`5m` | частота проверки active |
 | `MAX_BODY_BYTES` | `67108864` (64 MB) | лимит POST |
@@ -62,6 +63,11 @@
 | `SHARD_ID` | `0`, `1`, `2` |
 | `SHARD_ROLE` | `primary` |
 | `SHARD_READ_ONLY` | `false` (до seal) |
+| `SHARD_UUID` | стабильный UUID шарда |
+| `SHARD_CLUSTER_KEY` | ключ кластера (тот же, что `CLUSTER_KEY`) |
+| `SHARD_ADVERTISE_URL` | URL, по которому coordinator ходит в shard |
+| `SHARD_STARTUP_STATE` | `active`/`standby` (обычно `standby`) |
+| `COORDINATOR_URL` | `http://lbf-coord.internal:8080` |
 | `PG_DSN` | своя shard-N БД |
 | `DATA_DIR` | `/data/segments` |
 | `ROCKSDB_PATH` | `/data/rocksdb` |
@@ -117,6 +123,13 @@
    - `GET /v1/admin/shards`
    - `GET /metrics` на coordinator и shard
    - тестовый `POST /v1/packages?supplier_id=...`
+
+Mutating admin операции выполняются с `cluster_key`:
+
+- `POST /v1/admin/shards` — idempotent registration по `shard_uuid`
+- `PATCH /v1/admin/shards/{id}/state` — ручной switch (`standby -> active` только с `confirm=true`)
+
+При недоступности `active` coordinator работает в режиме fail-closed: `POST /v1/packages` возвращает `503 active_shard_unavailable` до ручного переключения.
 
 ---
 

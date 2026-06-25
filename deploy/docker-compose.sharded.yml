@@ -25,6 +25,7 @@ services:
       COORDINATOR_PG_DSN: postgres://lbf:lbf@coordinator-db:5432/coordinator?sslmode=disable
       COORDINATOR_BOOTSTRAP: /app/deploy/shards.bootstrap.json
       COORDINATOR_MIGRATIONS_PATH: /app/migrations/coordinator
+      CLUSTER_KEY: lbf-sharded-cluster-key
       SHARD_MAX_BYTES: "1073741824"
       SEAL_CHECK_INTERVAL: 30s
       MAX_BODY_BYTES: "67108864"
@@ -56,6 +57,11 @@ services:
       HTTP_ADDR: ":8080"
       SHARD_ID: "0"
       SHARD_ROLE: primary
+      SHARD_UUID: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+      SHARD_CLUSTER_KEY: lbf-sharded-cluster-key
+      SHARD_ADVERTISE_URL: http://shard-0-primary:8080
+      SHARD_STARTUP_STATE: active
+      COORDINATOR_URL: http://coordinator:8080
       PG_DSN: postgres://lbf:lbf@shard-0-db:5432/lbf_shard0?sslmode=disable
       DATA_DIR: /data/segments
       ROCKSDB_PATH: /data/rocksdb
@@ -120,6 +126,11 @@ services:
       HTTP_ADDR: ":8080"
       SHARD_ID: "1"
       SHARD_ROLE: primary
+      SHARD_UUID: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+      SHARD_CLUSTER_KEY: lbf-sharded-cluster-key
+      SHARD_ADVERTISE_URL: http://shard-1-primary:8080
+      SHARD_STARTUP_STATE: standby
+      COORDINATOR_URL: http://coordinator:8080
       PG_DSN: postgres://lbf:lbf@shard-1-db:5432/lbf_shard1?sslmode=disable
       DATA_DIR: /data/segments
       ROCKSDB_PATH: /data/rocksdb

@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,11 @@ import (
 type Repository struct {
 	pool *pgxpool.Pool
 }
+
+var (
+	ErrShardNotFound = errors.New("shard not found")
+	ErrStateConflict = errors.New("invalid shard state transition")
+)
 
 func NewRepository(ctx context.Context, dsn string) (*Repository, error) {
 	pool, err := pgxpool.New(ctx, dsn)
@@ -58,42 +64,56 @@ func RunMigrations(ctx context.Context, dsn, dir string) error {
 
 func (r *Repository) UpsertShard(ctx context.Context, s ShardInfo) error {
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO shard_registry (shard_id, state, primary_url, replica_url, total_bytes, sealed_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO shard_registry (
+			shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (shard_id) DO UPDATE SET
+			shard_uuid = COALESCE(EXCLUDED.shard_uuid, shard_registry.shard_uuid),
 			state = EXCLUDED.state,
 			primary_url = EXCLUDED.primary_url,
 			replica_url = EXCLUDED.replica_url,
 			total_bytes = EXCLUDED.total_bytes,
-			sealed_at = EXCLUDED.sealed_at`,
-		s.ShardID, string(s.State), s.PrimaryURL, s.ReplicaURL, s.TotalBytes, s.SealedAt)
+			sealed_at = EXCLUDED.sealed_at,
+			last_seen_at = EXCLUDED.last_seen_at,
+			last_error = EXCLUDED.last_error`,
+		s.ShardID,
+		s.ShardUUID,
+		string(s.State),
+		s.PrimaryURL,
+		s.ReplicaURL,
+		s.TotalBytes,
+		s.SealedAt,
+		s.LastSeenAt,
+		s.LastError,
+	)
 	return err
 }
 
 func (r *Repository) GetShard(ctx context.Context, shardID int) (*ShardInfo, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT shard_id, state, primary_url, replica_url, total_bytes, sealed_at, created_at
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
 		FROM shard_registry WHERE shard_id = $1`, shardID)
 	return scanShard(row)
 }
 
 func (r *Repository) ActiveShard(ctx context.Context) (*ShardInfo, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT shard_id, state, primary_url, replica_url, total_bytes, sealed_at, created_at
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
 		FROM shard_registry WHERE state = 'active' ORDER BY shard_id LIMIT 1`)
 	return scanShard(row)
 }
 
 func (r *Repository) StandbyShard(ctx context.Context) (*ShardInfo, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT shard_id, state, primary_url, replica_url, total_bytes, sealed_at, created_at
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
 		FROM shard_registry WHERE state = 'standby' ORDER BY shard_id LIMIT 1`)
 	return scanShard(row)
 }
 
 func (r *Repository) ListShards(ctx context.Context) ([]ShardInfo, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT shard_id, state, primary_url, replica_url, total_bytes, sealed_at, created_at
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
 		FROM shard_registry ORDER BY shard_id`)
 	if err != nil {
 		return nil, err
@@ -113,8 +133,21 @@ func (r *Repository) ListShards(ctx context.Context) ([]ShardInfo, error) {
 func scanShard(row pgx.Row) (*ShardInfo, error) {
 	var s ShardInfo
 	var state string
+	var shardUUID *string
 	var replica *string
-	err := row.Scan(&s.ShardID, &state, &s.PrimaryURL, &replica, &s.TotalBytes, &s.SealedAt, &s.CreatedAt)
+	var lastError *string
+	err := row.Scan(
+		&s.ShardID,
+		&shardUUID,
+		&state,
+		&s.PrimaryURL,
+		&replica,
+		&s.TotalBytes,
+		&s.SealedAt,
+		&s.LastSeenAt,
+		&lastError,
+		&s.CreatedAt,
+	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -122,7 +155,9 @@ func scanShard(row pgx.Row) (*ShardInfo, error) {
 		return nil, err
 	}
 	s.State = ShardState(state)
+	s.ShardUUID = shardUUID
 	s.ReplicaURL = replica
+	s.LastError = lastError
 	return &s, nil
 }
 
@@ -133,12 +168,27 @@ type rowScanner interface {
 func scanShardRow(rows rowScanner) (*ShardInfo, error) {
 	var s ShardInfo
 	var state string
+	var shardUUID *string
 	var replica *string
-	if err := rows.Scan(&s.ShardID, &state, &s.PrimaryURL, &replica, &s.TotalBytes, &s.SealedAt, &s.CreatedAt); err != nil {
+	var lastError *string
+	if err := rows.Scan(
+		&s.ShardID,
+		&shardUUID,
+		&state,
+		&s.PrimaryURL,
+		&replica,
+		&s.TotalBytes,
+		&s.SealedAt,
+		&s.LastSeenAt,
+		&lastError,
+		&s.CreatedAt,
+	); err != nil {
 		return nil, err
 	}
 	s.State = ShardState(state)
+	s.ShardUUID = shardUUID
 	s.ReplicaURL = replica
+	s.LastError = lastError
 	return &s, nil
 }
 
@@ -146,6 +196,183 @@ func (r *Repository) SetShardState(ctx context.Context, shardID int, state Shard
 	_, err := r.pool.Exec(ctx, `
 		UPDATE shard_registry SET state = $2, total_bytes = $3, sealed_at = $4 WHERE shard_id = $1`,
 		shardID, string(state), totalBytes, sealedAt)
+	return err
+}
+
+func (r *Repository) GetShardByUUID(ctx context.Context, shardUUID string) (*ShardInfo, error) {
+	row := r.pool.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry WHERE shard_uuid = $1`, shardUUID)
+	return scanShard(row)
+}
+
+func (r *Repository) RegisterShard(ctx context.Context, shardUUID string, state ShardState, primaryURL string, replicaURL *string) (*ShardInfo, bool, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	existing, err := scanShard(tx.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry WHERE shard_uuid = $1 FOR UPDATE`, shardUUID))
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
+		_, err := tx.Exec(ctx, `
+			UPDATE shard_registry
+			SET primary_url = $2, replica_url = $3, last_seen_at = NOW(), last_error = NULL
+			WHERE shard_uuid = $1`,
+			shardUUID, primaryURL, replicaURL)
+		if err != nil {
+			return nil, false, err
+		}
+		updated, err := scanShard(tx.QueryRow(ctx, `
+			SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+			FROM shard_registry WHERE shard_uuid = $1`, shardUUID))
+		if err != nil {
+			return nil, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, err
+		}
+		return updated, false, nil
+	}
+
+	var nextID int
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(shard_id), -1) + 1 FROM shard_registry`).Scan(&nextID); err != nil {
+		return nil, false, err
+	}
+
+	if state == ShardActive {
+		alreadyActive, err := scanShard(tx.QueryRow(ctx, `
+			SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+			FROM shard_registry
+			WHERE state = 'active'
+			ORDER BY shard_id
+			LIMIT 1
+			FOR UPDATE`))
+		if err != nil {
+			return nil, false, err
+		}
+		if alreadyActive != nil {
+			return nil, false, ErrStateConflict
+		}
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO shard_registry (
+			shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error
+		)
+		VALUES ($1, $2, $3, $4, $5, 0, NULL, NOW(), NULL)`,
+		nextID, shardUUID, string(state), primaryURL, replicaURL)
+	if err != nil {
+		return nil, false, err
+	}
+
+	created, err := scanShard(tx.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry WHERE shard_id = $1`, nextID))
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return created, true, nil
+}
+
+func (r *Repository) PatchShardState(ctx context.Context, shardID int, nextState ShardState, confirm bool) (*ShardInfo, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	target, err := scanShard(tx.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry
+		WHERE shard_id = $1
+		FOR UPDATE`, shardID))
+	if err != nil {
+		return nil, err
+	}
+	if target == nil {
+		return nil, ErrShardNotFound
+	}
+
+	switch nextState {
+	case ShardSealed:
+		if target.State != ShardActive {
+			return nil, ErrStateConflict
+		}
+		now := time.Now().UTC()
+		if _, err := tx.Exec(ctx, `
+			UPDATE shard_registry
+			SET state = 'sealed', sealed_at = $2
+			WHERE shard_id = $1`, shardID, &now); err != nil {
+			return nil, err
+		}
+	case ShardActive:
+		if target.State != ShardStandby || !confirm {
+			return nil, ErrStateConflict
+		}
+		// Keep single-active invariant: seal previous active, then promote target.
+		currentActive, err := scanShard(tx.QueryRow(ctx, `
+			SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+			FROM shard_registry
+			WHERE state = 'active' AND shard_id <> $1
+			ORDER BY shard_id
+			LIMIT 1
+			FOR UPDATE`, shardID))
+		if err != nil {
+			return nil, err
+		}
+		if currentActive != nil {
+			now := time.Now().UTC()
+			if _, err := tx.Exec(ctx, `
+				UPDATE shard_registry
+				SET state = 'sealed', sealed_at = $2
+				WHERE shard_id = $1`, currentActive.ShardID, &now); err != nil {
+				return nil, err
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE shard_registry
+			SET state = 'active', sealed_at = NULL, last_error = NULL
+			WHERE shard_id = $1`, shardID); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, ErrStateConflict
+	}
+
+	updated, err := scanShard(tx.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry WHERE shard_id = $1`, shardID))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (r *Repository) MarkShardReachable(ctx context.Context, shardID int) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE shard_registry
+		SET last_seen_at = NOW(), last_error = NULL
+		WHERE shard_id = $1`, shardID)
+	return err
+}
+
+func (r *Repository) MarkShardUnreachable(ctx context.Context, shardID int, lastErr string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE shard_registry
+		SET last_error = $2
+		WHERE shard_id = $1`, shardID, lastErr)
 	return err
 }
 
@@ -196,12 +423,17 @@ func (r *Repository) BootstrapFromFile(ctx context.Context, path string) error {
 		return err
 	}
 	for _, b := range shards {
+		var shardUUID *string
+		if b.ShardUUID != "" {
+			shardUUID = &b.ShardUUID
+		}
 		var replica *string
 		if b.ReplicaURL != "" {
 			replica = &b.ReplicaURL
 		}
 		if err := r.UpsertShard(ctx, ShardInfo{
 			ShardID:    b.ShardID,
+			ShardUUID:  shardUUID,
 			State:      ShardState(b.State),
 			PrimaryURL: b.PrimaryURL,
 			ReplicaURL: replica,

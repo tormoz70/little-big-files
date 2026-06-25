@@ -2,11 +2,13 @@
   {
     "shard_id": 0,
     "state": "active",
-    "primary_url": "http://shard-0-primary:8080"
+    "primary_url": "http://shard-0-primary:8080",
+    "shard_uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
   },
   {
     "shard_id": 1,
     "state": "standby",
-    "primary_url": "http://shard-1-primary:8080"
+    "primary_url": "http://shard-1-primary:8080",
+    "shard_uuid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
   }
 ]

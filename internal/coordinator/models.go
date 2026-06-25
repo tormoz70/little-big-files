@@ -14,11 +14,14 @@ const (
 
 type ShardInfo struct {
 	ShardID    int        `json:"shard_id"`
+	ShardUUID  *string    `json:"shard_uuid,omitempty"`
 	State      ShardState `json:"state"`
 	PrimaryURL string     `json:"primary_url"`
 	ReplicaURL *string    `json:"replica_url,omitempty"`
 	TotalBytes int64      `json:"total_bytes"`
 	SealedAt   *time.Time `json:"sealed_at,omitempty"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	LastError  *string    `json:"last_error,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
@@ -36,4 +39,5 @@ type BootstrapShard struct {
 	State      string `json:"state"`
 	PrimaryURL string `json:"primary_url"`
 	ReplicaURL string `json:"replica_url,omitempty"`
+	ShardUUID  string `json:"shard_uuid,omitempty"`
 }
