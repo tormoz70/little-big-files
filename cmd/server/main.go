@@ -15,6 +15,8 @@ import (
 	"github.com/little-big-files/little-big-files/internal/dedup"
 	"github.com/little-big-files/little-big-files/internal/ingestion"
 	"github.com/little-big-files/little-big-files/internal/metadata"
+	"github.com/little-big-files/little-big-files/internal/metrics"
+	"github.com/little-big-files/little-big-files/internal/recovery"
 	"github.com/little-big-files/little-big-files/internal/storage"
 )
 
@@ -22,9 +24,11 @@ func main() {
 	cfg := config.Load()
 	ctx := context.Background()
 
-	if err := metadata.RunMigrations(ctx, cfg.PGDSN, cfg.MigrationsPath); err != nil {
-		slog.Error("migrations failed", "err", err)
-		os.Exit(1)
+	if cfg.ShardRole != "replica" {
+		if err := metadata.RunMigrations(ctx, cfg.PGDSN, cfg.MigrationsPath); err != nil {
+			slog.Error("migrations failed", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	repo, err := metadata.NewPostgresRepository(ctx, cfg.PGDSN)
@@ -40,6 +44,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer segments.Close()
+
+	segmentIndex := storage.NewSegmentIndex(cfg.DataDir)
+	defer segmentIndex.Close()
 
 	if cfg.WriteBufferMaxBytes > 0 {
 		wb := storage.NewWriteBuffer(segments, cfg.WriteBufferMaxBytes, cfg.WriteBufferInterval)
@@ -72,17 +79,34 @@ func main() {
 		slog.Info("dedup index enabled", "backend", dedupIdx.Backend())
 	}
 
-	blobs := storage.NewBlobStore(segments, encoder, dedupIdx)
+	blobs := storage.NewBlobStore(segments, segmentIndex, encoder, dedupIdx)
 	ingest := ingestion.NewService(cfg, repo, blobs)
 
+	if cfg.ShardRole != "replica" {
+		journal, err := recovery.NewJournal(cfg.DataDir)
+		if err != nil {
+			slog.Error("journal init failed", "err", err)
+			os.Exit(1)
+		}
+		defer journal.Close()
+		ingest.SetJournal(journal)
+	}
+
 	var unpackQ *ingestion.UnpackQueue
-	if cfg.LargeZipAsyncUnpack {
+	if cfg.LargeZipAsyncUnpack && cfg.ShardRole != "replica" && !cfg.ShardReadOnly {
 		unpackQ = ingestion.NewUnpackQueue(ingest, cfg.UnpackWorkers, cfg.UnpackQueueSize)
 		ingest.SetUnpackQueue(unpackQ)
 		defer unpackQ.Shutdown()
 	}
 
-	srv := api.NewServer(cfg, ingest, repo, blobs)
+	srv := api.NewShardServer(cfg, ingest, repo, blobs, segments)
+	if guard := srv.ShardGuard(); guard != nil {
+		var blobStats metrics.BlobByteTotalsProvider
+		if cfg.ShardRole == "primary" {
+			blobStats = repo
+		}
+		metrics.RunShardRefresh(ctx, guard, segments, blobStats, 10*time.Second)
+	}
 
 	httpSrv := &http.Server{
 		Addr:         cfg.HTTPAddr,
@@ -92,7 +116,7 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("listening", "addr", cfg.HTTPAddr)
+	slog.Info("listening", "addr", cfg.HTTPAddr, "shard_id", cfg.ShardID, "role", cfg.ShardRole)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "err", err)
 			os.Exit(1)

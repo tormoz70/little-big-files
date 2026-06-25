@@ -285,6 +285,28 @@ func (sm *SegmentManager) Read(loc Location) ([]byte, error) {
 	return payload, err
 }
 
+// TotalBytes returns on-disk size of all segment files.
+func (sm *SegmentManager) TotalBytes() (int64, error) {
+	entries, err := os.ReadDir(sm.dir)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return 0, err
+		}
+		total += info.Size()
+	}
+	return total, nil
+}
+
+func (sm *SegmentManager) SegmentDir() string { return sm.dir }
+
 func (sm *SegmentManager) Close() error {
 	if sm.buffer != nil {
 		sm.buffer.Close()

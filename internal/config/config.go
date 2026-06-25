@@ -28,6 +28,15 @@ type Config struct {
 	BloomExpectedItems  uint
 	BloomFalsePositive  float64
 	DedupRebuildOnStart bool
+	// Shard (F4)
+	ShardID             int
+	ShardRole           string // primary | replica
+	ShardReadOnly       bool
+	// Coordinator (F4)
+	CoordinatorPGDSN    string
+	ShardMaxBytes       int64
+	SealCheckInterval   time.Duration
+	CoordinatorBootstrap string // shard registry bootstrap file or inline
 }
 
 func Load() Config {
@@ -53,6 +62,13 @@ func Load() Config {
 		BloomExpectedItems:  uint(envInt("BLOOM_EXPECTED_ITEMS", 1_000_000)),
 		BloomFalsePositive:  envFloat("BLOOM_FALSE_POSITIVE", 0.001),
 		DedupRebuildOnStart: envBool("DEDUP_REBUILD_ON_START", true),
+		ShardID:             envInt("SHARD_ID", 0),
+		ShardRole:           env("SHARD_ROLE", "primary"),
+		ShardReadOnly:       envBool("SHARD_READ_ONLY", false),
+		CoordinatorPGDSN:    env("COORDINATOR_PG_DSN", "postgres://lbf:lbf@localhost:5433/coordinator?sslmode=disable"),
+		ShardMaxBytes:       envInt64("SHARD_MAX_BYTES", 500*1024*1024*1024),
+		SealCheckInterval:   envDuration("SEAL_CHECK_INTERVAL", 30*time.Second),
+		CoordinatorBootstrap: env("COORDINATOR_BOOTSTRAP", "./deploy/shards.bootstrap.json"),
 	}
 }
 

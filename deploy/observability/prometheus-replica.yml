@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: coordinator
+    static_configs:
+      - targets: ["coordinator:8080"]
+        labels:
+          service: coordinator
+
+  - job_name: shards
+    static_configs:
+      - targets:
+          - shard-0-primary:8080
+          - shard-0-replica:8080
+          - shard-1-primary:8080
+          - shard-1-replica:8080
+          - shard-2-primary:8080
+          - shard-2-replica:8080
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: 'shard-(\d+)-(primary|replica):8080'
+        target_label: shard_id
+        replacement: '${1}'
+      - source_labels: [__address__]
+        regex: 'shard-(\d+)-(primary|replica):8080'
+        target_label: role
+        replacement: '${2}'

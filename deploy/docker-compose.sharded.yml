@@ -1,0 +1,184 @@
+services:
+  coordinator-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: coordinator
+    volumes:
+      - coordinator-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d coordinator"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: coordinator
+    ports:
+      - "8080:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      COORDINATOR_PG_DSN: postgres://lbf:lbf@coordinator-db:5432/coordinator?sslmode=disable
+      COORDINATOR_BOOTSTRAP: /app/deploy/shards.bootstrap.json
+      COORDINATOR_MIGRATIONS_PATH: /app/migrations/coordinator
+      SHARD_MAX_BYTES: "1073741824"
+      SEAL_CHECK_INTERVAL: 30s
+      MAX_BODY_BYTES: "67108864"
+    depends_on:
+      coordinator-db:
+        condition: service_healthy
+      shard-0-primary:
+        condition: service_started
+      shard-1-primary:
+        condition: service_started
+    volumes:
+      - ../deploy/shards.bootstrap.json:/app/deploy/shards.bootstrap.json:ro
+
+  shard-0-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: lbf_shard0
+    volumes:
+      - shard0-pg:/var/lib/postgresql/data
+
+  shard-0-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment: &shard0-primary-env
+      HTTP_ADDR: ":8080"
+      SHARD_ID: "0"
+      SHARD_ROLE: primary
+      PG_DSN: postgres://lbf:lbf@shard-0-db:5432/lbf_shard0?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      DEDUP_BACKEND: memory
+      MIGRATIONS_PATH: /app/migrations
+      EXAMPLES_DIR: /app/examples
+      COMPRESSION_ENABLED: "true"
+    volumes:
+      - shard0-segments:/data/segments
+      - shard0-rocksdb:/data/rocksdb
+    depends_on:
+      - shard-0-db
+
+  shard-0-replica:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      <<: *shard0-primary-env
+      SHARD_ROLE: replica
+      SHARD_READ_ONLY: "true"
+      PG_DSN: postgres://lbf:lbf@shard-0-db:5432/lbf_shard0?sslmode=disable
+    volumes:
+      - shard0-replica-segments:/data/segments
+      - shard0-replica-rocksdb:/data/rocksdb
+    depends_on:
+      - shard-0-primary
+
+  shard-0-sync:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: shard-sync
+    environment:
+      SYNC_PRIMARY_URL: http://shard-0-primary:8080
+      DATA_DIR: /data/segments
+      SYNC_INTERVAL: 15s
+    volumes:
+      - shard0-replica-segments:/data/segments
+    depends_on:
+      - shard-0-primary
+      - shard-0-replica
+
+  shard-1-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: lbf_shard1
+    volumes:
+      - shard1-pg:/var/lib/postgresql/data
+
+  shard-1-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      HTTP_ADDR: ":8080"
+      SHARD_ID: "1"
+      SHARD_ROLE: primary
+      PG_DSN: postgres://lbf:lbf@shard-1-db:5432/lbf_shard1?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      DEDUP_BACKEND: memory
+      MIGRATIONS_PATH: /app/migrations
+      EXAMPLES_DIR: /app/examples
+    volumes:
+      - shard1-segments:/data/segments
+      - shard1-rocksdb:/data/rocksdb
+    depends_on:
+      - shard-1-db
+
+  shard-1-replica:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      HTTP_ADDR: ":8080"
+      SHARD_ID: "1"
+      SHARD_ROLE: replica
+      SHARD_READ_ONLY: "true"
+      PG_DSN: postgres://lbf:lbf@shard-1-db:5432/lbf_shard1?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      DEDUP_BACKEND: memory
+      MIGRATIONS_PATH: /app/migrations
+    volumes:
+      - shard1-replica-segments:/data/segments
+      - shard1-replica-rocksdb:/data/rocksdb
+    depends_on:
+      - shard-1-primary
+
+  shard-1-sync:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: shard-sync
+    environment:
+      SYNC_PRIMARY_URL: http://shard-1-primary:8080
+      DATA_DIR: /data/segments
+      SYNC_INTERVAL: 15s
+    volumes:
+      - shard1-replica-segments:/data/segments
+    depends_on:
+      - shard-1-primary
+      - shard-1-replica
+
+volumes:
+  coordinator-pg:
+  shard0-pg:
+  shard0-segments:
+  shard0-rocksdb:
+  shard0-replica-segments:
+  shard0-replica-rocksdb:
+  shard1-pg:
+  shard1-segments:
+  shard1-rocksdb:
+  shard1-replica-segments:
+  shard1-replica-rocksdb:

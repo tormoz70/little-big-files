@@ -1,0 +1,9 @@
+# Override for local stand with replica + segment sync (use with --profile replica).
+services:
+  coordinator:
+    volumes:
+      - ../deploy/shards.local.replica.json:/app/deploy/shards.local.json:ro
+
+  prometheus:
+    volumes:
+      - ./observability/prometheus-replica.yml:/etc/prometheus/prometheus.yml:ro

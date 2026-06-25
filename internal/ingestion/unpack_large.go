@@ -9,12 +9,12 @@ import (
 )
 
 // persistZipMembers adds member or unpack_error rows after original already exists.
-func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, members []ZipMember, unpackErr error, counters *ingestCounters) (fileCount int, unpackErrText *string, err error) {
+func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, supplierID int, members []ZipMember, unpackErr error, counters *ingestCounters) (fileCount int, unpackErrText *string, err error) {
 	if unpackErr != nil {
 		msg := unpackErr.Error()
 		unpackErrText = &msg
 		errBytes := []byte(msg)
-		errHash, created, err := blobs.StoreOrRef(ctx, tx, errBytes, storage.RecordError)
+		errHash, created, err := blobs.StoreOrRef(ctx, tx, errBytes, storage.RecordError, supplierID)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -33,7 +33,7 @@ func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobS
 	}
 
 	for i, m := range members {
-		memberHash, created, err := blobs.StoreOrRef(ctx, tx, m.Data, storage.RecordXML)
+		memberHash, created, err := blobs.StoreOrRef(ctx, tx, m.Data, storage.RecordXML, supplierID)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -94,7 +94,7 @@ func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error
 	var unpackErrText *string
 	err = s.repo.WithTx(ctx, func(tx metadata.Tx) error {
 		// Re-check under transaction via fresh read would be ideal; accept rare double-unpack race for v1.
-		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, members, unpackErr, nil)
+		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, pkg.SupplierID, members, unpackErr, nil)
 		if err != nil {
 			return err
 		}
@@ -106,7 +106,11 @@ func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error
 		return err
 	}
 
-	return s.propagateUnpackToClones(ctx, packageID)
+	if err := s.propagateUnpackToClones(ctx, packageID); err != nil {
+		return err
+	}
+	_, err = s.loadAndJournal(ctx, packageID)
+	return err
 }
 
 func (s *Service) propagateUnpackToClones(ctx context.Context, canonicalID int64) error {

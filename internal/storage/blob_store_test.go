@@ -3,11 +3,14 @@ package storage_test
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/little-big-files/little-big-files/internal/compress"
+	"github.com/little-big-files/little-big-files/internal/config"
+	"github.com/little-big-files/little-big-files/internal/dedup"
 	"github.com/little-big-files/little-big-files/internal/metadata"
 	"github.com/little-big-files/little-big-files/internal/storage"
 	"github.com/stretchr/testify/require"
@@ -107,12 +110,12 @@ func TestBlobStoreCompressionRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer enc.Close()
 
-	blobs := storage.NewBlobStore(sm, enc, nil)
+	blobs := storage.NewBlobStore(sm, nil, enc, nil)
 	tx := newMemTx()
 	ctx := context.Background()
 
 	original := samples[0]
-	hash, created, err := blobs.StoreOrRef(ctx, tx, original, storage.RecordXML)
+	hash, created, err := blobs.StoreOrRef(ctx, tx, original, storage.RecordXML, 1)
 	require.NoError(t, err)
 	require.True(t, created)
 	require.Equal(t, storage.ContentHash(original), hash)
@@ -124,11 +127,13 @@ func TestBlobStoreCompressionRoundTrip(t *testing.T) {
 	readBack, err := blobs.ReadBlob(*blob)
 	require.NoError(t, err)
 	require.Equal(t, original, readBack)
+	require.Greater(t, blob.StoredSize, 0)
 
 	if len(dict) > 0 {
 		magic, _, err := sm.ReadRecord(blob.SegmentID, blob.Offset)
 		require.NoError(t, err)
 		require.True(t, storage.IsCompressedXML(magic))
+		require.Less(t, blob.StoredSize, blob.Size)
 	}
 }
 
@@ -149,4 +154,140 @@ func TestWriteBufferBatchesFlush(t *testing.T) {
 	data, err := sm.Read(loc)
 	require.NoError(t, err)
 	require.Equal(t, []byte("payload-one"), data)
+}
+
+func TestWriteBufferBatchBySize(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	wb := storage.NewWriteBuffer(sm, 64, time.Second)
+	sm.SetWriteBuffer(wb)
+	defer wb.Close()
+
+	record := storage.EncodeRecord(storage.MagicXML, []byte("0123456789012345678901234567890123456789012345678901234567890"))
+	for i := 0; i < 3; i++ {
+		_, err := sm.Append(record)
+		require.NoError(t, err)
+	}
+}
+
+func TestBlobStoreDedupRef(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	cfg := config.Config{DedupBackend: "memory", BloomExpectedItems: 1000}
+	idx, err := dedup.Open(cfg)
+	require.NoError(t, err)
+	defer idx.Close()
+
+	blobs := storage.NewBlobStore(sm, nil, nil, idx)
+	tx := newMemTx()
+	ctx := context.Background()
+	data := []byte(`<?xml version="1.0"?><dup/>`)
+
+	hash1, created1, err := blobs.StoreOrRef(ctx, tx, data, storage.RecordXML, 1)
+	require.NoError(t, err)
+	require.True(t, created1)
+
+	hash2, created2, err := blobs.StoreOrRef(ctx, tx, data, storage.RecordXML, 1)
+	require.NoError(t, err)
+	require.False(t, created2)
+	require.Equal(t, hash1, hash2)
+
+	blob, err := tx.GetBlob(ctx, hash1)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), blob.RefCount)
+}
+
+func TestBlobStoreWritesSegmentIndex(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	idx := storage.NewSegmentIndex(dir)
+	defer idx.Close()
+
+	blobs := storage.NewBlobStore(sm, idx, nil, nil)
+	tx := newMemTx()
+	ctx := context.Background()
+	body := []byte(`<?xml version="1.0"?><doc id="1"/>`)
+
+	hash, created, err := blobs.StoreOrRef(ctx, tx, body, storage.RecordXML, 1577)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	entries, err := storage.ReadIndexFile(filepath.Join(dir, "segment_0000.idx"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, uint32(1577), entries[0].SupplierID)
+	require.Equal(t, storage.MagicXML, entries[0].Magic)
+	require.Equal(t, storage.ContentHash(body), hash[:])
+}
+
+func TestBlobStoreWritesSegmentIndexCompressedWithDictID(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	idx := storage.NewSegmentIndex(dir)
+	defer idx.Close()
+
+	samples := trainingSamples(200)
+	dict, err := compress.TrainDictionary(samples, compress.DefaultDictSize)
+	require.NoError(t, err)
+	enc, err := compress.NewEncoder(dict, 32)
+	require.NoError(t, err)
+	enc.SetDictID(3)
+	defer enc.Close()
+
+	blobs := storage.NewBlobStore(sm, idx, enc, nil)
+	tx := newMemTx()
+	ctx := context.Background()
+	original := samples[0]
+	for len(original) < 128 {
+		original = append(original, original...)
+	}
+
+	_, created, err := blobs.StoreOrRef(ctx, tx, original, storage.RecordXML, 2447)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	entries, err := storage.ReadIndexFile(filepath.Join(dir, "segment_0000.idx"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, storage.MagicXMLC, entries[0].Magic)
+	require.Equal(t, uint32(3), entries[0].DictID)
+	require.Equal(t, uint32(2447), entries[0].SupplierID)
+}
+
+func TestBlobStoreZIPRecord(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	blobs := storage.NewBlobStore(sm, nil, nil, nil)
+	tx := newMemTx()
+	ctx := context.Background()
+	zipData := []byte{0x50, 0x4b, 0x03, 0x04}
+
+	hash, created, err := blobs.StoreOrRef(ctx, tx, zipData, storage.RecordZIP, 1)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	magic, _, err := sm.ReadRecord(0, 0)
+	require.NoError(t, err)
+	require.Equal(t, storage.MagicZIP, magic)
+	require.NotEmpty(t, hash)
+}
+
+func TestPackageHashEqualsContentHash(t *testing.T) {
+	data := []byte("same")
+	require.Equal(t, storage.ContentHash(data), storage.PackageHash(data))
 }

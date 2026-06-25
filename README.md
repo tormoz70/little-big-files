@@ -38,15 +38,70 @@ Environment:
 | `BLOOM_FALSE_POSITIVE` | `0.001` |
 | `DEDUP_REBUILD_ON_START` | `true` — reload Bloom+index from `content_blobs` |
 
+## Phase 4: sharded test stand
+
+Volume-based sharding with Coordinator. Replica per shard is **optional** (Docker profile `replica`).
+
+```bash
+make docker-sharded
+curl -X POST "http://localhost:8080/v1/packages?supplier_id=1" -d '<?xml version="1.0"?><doc/>'
+curl http://localhost:8080/v1/admin/shards
+```
+
+With primary/replica mirroring and HTTP segment sync:
+
+```bash
+make docker-sharded-replica
+```
+
+### Local stand: 3 shards × 50 MB + Python clients
+
+```bash
+make docker-local
+make stand-upload
+# or: python clients/python/upload_examples.py --wait --repeat 300
+```
+
+With replicas: `make docker-local-replica`
+
+Ten test suppliers (`1001`–`1010`), example ZIPs from `examples/`. Grafana `:3000` (admin/lbf), Prometheus `:9090`. See [clients/python/README.md](clients/python/README.md) and [docs/test-stand.md](docs/test-stand.md#11-локальный-стенд-3-шарда--50-mb).
+
+| Variable | Default | Role |
+|----------|---------|------|
+| `COORDINATOR_PG_DSN` | coordinator PG | Global index |
+| `COORDINATOR_BOOTSTRAP` | `./deploy/shards.bootstrap.json` | Shard registry |
+| `SHARD_MAX_BYTES` | 500 GB | Seal trigger |
+| `SEAL_CHECK_INTERVAL` | `30s` | Auto seal poll |
+| `SHARD_ID` | `0` | Shard instance id |
+| `SHARD_ROLE` | `primary` | `primary` / `replica` |
+| `SHARD_READ_ONLY` | `false` | Sealed / replica writes blocked |
+| `SYNC_PRIMARY_URL` | — | Replica segment sync source (shard-sync) |
+
+Architecture: clients → **Coordinator :8080** → active shard primary. Reads from sealed shards use **replica_url** when set in bootstrap; otherwise the sealed **primary** serves reads.
+
+**Подробное описание стенда:** [docs/test-stand.md](docs/test-stand.md) — VM, контейнеры, сценарии проверки, seal, troubleshooting.
+
+See also [sharding-model.md](docs/sharding-model.md).
+
 ## Build & test
 
 ```bash
 make build
 make test
+make test-coverage
+```
+
+Integration tests (PostgreSQL):
+
+```bash
+make docker-up
+PG_DSN=postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable make test-integration
 ```
 
 ## Docs
 
+- [test-stand.md](docs/test-stand.md) — **тестовый стенд Ф4** (развёртывание, сценарии)
+- [pilot-stand.md](docs/pilot-stand.md) — **опытная эксплуатация на ВМ** (параметры и инструкция)
 - [architecture.md](docs/architecture.md)
 - [stack.md](docs/stack.md)
 - [sharding-model.md](docs/sharding-model.md)

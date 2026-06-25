@@ -29,7 +29,7 @@ func TestDedupStatsOnRepeatedXML(t *testing.T) {
 	require.NoError(t, err)
 	defer idx.Close()
 
-	blobs := storage.NewBlobStore(segments, nil, idx)
+	blobs := storage.NewBlobStore(segments, nil, nil, idx)
 	svc := ingestion.NewService(cfg, repo, blobs)
 	ctx := context.Background()
 
@@ -62,7 +62,7 @@ func TestHotPathSkipsPGOnBloomMiss(t *testing.T) {
 
 	var pgLookups int
 	wrapped := &countingRepo{MemoryRepository: repo, onGetBlob: func() { pgLookups++ }}
-	blobs := storage.NewBlobStore(segments, nil, idx)
+	blobs := storage.NewBlobStore(segments, nil, nil, idx)
 	svc := ingestion.NewService(cfg, wrapped, blobs)
 	ctx := context.Background()
 

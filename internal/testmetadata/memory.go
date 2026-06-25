@@ -267,6 +267,22 @@ func (r *MemoryRepository) ListContentBlobs(ctx context.Context) ([]metadata.Con
 	return out, nil
 }
 
+func (r *MemoryRepository) BlobByteTotals(ctx context.Context) (metadata.BlobByteTotals, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var totals metadata.BlobByteTotals
+	for _, b := range r.blobs {
+		totals.LogicalBytes += int64(b.Size)
+		stored := b.StoredSize
+		if stored <= 0 {
+			stored = b.Size
+		}
+		totals.StoredBytes += int64(stored)
+		totals.ReferencedLogicalBytes += int64(b.Size) * b.RefCount
+	}
+	return totals, nil
+}
+
 func (r *MemoryRepository) RecordSupplierIngest(ctx context.Context, supplierID, fileCount, newBlobs, duplicateRefs int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

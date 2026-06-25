@@ -1,4 +1,4 @@
-CREATE TABLE supplier_stats (
+CREATE TABLE IF NOT EXISTS supplier_stats (
     supplier_id     INT PRIMARY KEY,
     total_packages  BIGINT NOT NULL DEFAULT 0,
     total_refs      BIGINT NOT NULL DEFAULT 0,

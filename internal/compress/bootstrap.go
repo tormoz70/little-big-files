@@ -3,6 +3,7 @@ package compress
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/little-big-files/little-big-files/internal/config"
 )
@@ -18,9 +19,21 @@ func BootstrapEncoder(ctx context.Context, cfg config.Config, repo dictRepo) (*E
 		return nil, nil
 	}
 
-	dict, _, err := repo.GetLatestDictionary(ctx)
+	dataRoot := filepath.Dir(cfg.DataDir)
+	sidecar := NewSidecar(dataRoot)
+	dictID, dict, err := sidecar.LoadCurrent()
 	if err != nil {
 		return nil, err
+	}
+	if len(dict) == 0 {
+		dict, _, err = repo.GetLatestDictionary(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(dict) > 0 {
+			dictID = 1
+			_ = sidecar.Save(dictID, dict)
+		}
 	}
 	if len(dict) == 0 {
 		samples, err := LoadSamplesFromExamples(cfg.ExamplesDir, 500)
@@ -32,10 +45,18 @@ func BootstrapEncoder(ctx context.Context, cfg config.Config, repo dictRepo) (*E
 			if err != nil {
 				return nil, err
 			}
-			if err := repo.SaveDictionary(ctx, dict, len(samples)); err != nil {
-				return nil, err
+			if len(dict) > 0 {
+				if err := repo.SaveDictionary(ctx, dict, len(samples)); err != nil {
+					return nil, err
+				}
+				if err := sidecar.Save(1, dict); err != nil {
+					return nil, err
+				}
+				dictID = 1
+				slog.Info("trained compression dictionary", "samples", len(samples), "dict_bytes", len(dict))
+			} else {
+				slog.Info("dictionary training skipped (samples too small), using raw zstd")
 			}
-			slog.Info("trained compression dictionary", "samples", len(samples), "dict_bytes", len(dict))
 		}
 	}
 
@@ -43,6 +64,10 @@ func BootstrapEncoder(ctx context.Context, cfg config.Config, repo dictRepo) (*E
 	if err != nil {
 		return nil, err
 	}
+	if dictID <= 0 && len(dict) > 0 {
+		dictID = 1
+	}
+	enc.SetDictID(dictID)
 	if len(dict) > 0 {
 		slog.Info("compression enabled", "dict_bytes", len(dict))
 	} else {

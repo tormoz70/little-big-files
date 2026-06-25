@@ -11,6 +11,7 @@ const DefaultDictSize = 32 * 1024
 
 // Encoder compresses XML payloads with an optional Zstd dictionary.
 type Encoder struct {
+	dictID  int
 	minSize int
 	dict    []byte
 	enc     *zstd.Encoder
@@ -49,6 +50,10 @@ func (e *Encoder) init() error {
 	e.dec = dec
 	return nil
 }
+
+func (e *Encoder) DictID() int { return e.dictID }
+
+func (e *Encoder) SetDictID(id int) { e.dictID = id }
 
 func (e *Encoder) ShouldCompress(size int) bool {
 	return size >= e.minSize

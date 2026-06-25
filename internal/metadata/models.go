@@ -8,6 +8,7 @@ import (
 type ContentBlob struct {
 	ContentHash []byte
 	Size        int
+	StoredSize  int // on-disk record bytes (header + payload); 0 = unknown/legacy
 	SegmentID   int
 	Offset      int64
 	RefCount    int64
@@ -71,6 +72,13 @@ func (s SupplierStats) DedupRatio() float64 {
 	return float64(s.DuplicateRefs) / float64(s.TotalRefs)
 }
 
+// BlobByteTotals aggregates logical vs on-disk blob sizes for compression metrics.
+type BlobByteTotals struct {
+	LogicalBytes           int64 // SUM(size) over unique blobs
+	StoredBytes            int64 // SUM(stored_size) with fallback to size
+	ReferencedLogicalBytes int64 // SUM(size * ref_count)
+}
+
 type Tx interface {
 	GetBlob(ctx context.Context, hash []byte) (*ContentBlob, error)
 	InsertBlob(ctx context.Context, blob ContentBlob) error
@@ -97,6 +105,7 @@ type Repository interface {
 	GetLatestDictionary(ctx context.Context) ([]byte, int, error)
 	SaveDictionary(ctx context.Context, dict []byte, entryCount int) error
 	ListContentBlobs(ctx context.Context) ([]ContentBlob, error)
+	BlobByteTotals(ctx context.Context) (BlobByteTotals, error)
 	RecordSupplierIngest(ctx context.Context, supplierID, fileCount, newBlobs, duplicateRefs int) error
 	GetSupplierStats(ctx context.Context, supplierID int) (*SupplierStats, error)
 }

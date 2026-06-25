@@ -1,0 +1,2 @@
+ALTER TABLE content_blobs
+    ADD COLUMN IF NOT EXISTS stored_size INT NOT NULL DEFAULT 0;

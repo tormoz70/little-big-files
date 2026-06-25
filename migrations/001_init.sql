@@ -1,15 +1,15 @@
 -- Content-addressed storage metadata (Phase 1)
 
-CREATE TABLE content_blobs (
+CREATE TABLE IF NOT EXISTS content_blobs (
     content_hash    BYTEA PRIMARY KEY,
     size            INT NOT NULL,
     segment_id      INT NOT NULL,
-    offset          BIGINT NOT NULL,
+    "offset"        BIGINT NOT NULL,
     ref_count       BIGINT NOT NULL DEFAULT 1,
     first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE packages (
+CREATE TABLE IF NOT EXISTS packages (
     id                   BIGSERIAL PRIMARY KEY,
     supplier_id          INT NOT NULL,
     received_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -22,10 +22,10 @@ CREATE TABLE packages (
     unpack_error         TEXT
 );
 
-CREATE INDEX idx_packages_hash ON packages(package_hash);
-CREATE INDEX idx_packages_supplier ON packages(supplier_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_packages_hash ON packages(package_hash);
+CREATE INDEX IF NOT EXISTS idx_packages_supplier ON packages(supplier_id, received_at DESC);
 
-CREATE TABLE package_files (
+CREATE TABLE IF NOT EXISTS package_files (
     id                BIGSERIAL PRIMARY KEY,
     package_id        BIGINT NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
     blob_hash         BYTEA NOT NULL REFERENCES content_blobs(content_hash),
@@ -34,6 +34,6 @@ CREATE TABLE package_files (
     sequence_number   INT
 );
 
-CREATE INDEX idx_package_files_package ON package_files(package_id);
-CREATE UNIQUE INDEX idx_package_files_original ON package_files(package_id) WHERE role = 'original';
-CREATE UNIQUE INDEX idx_package_files_unpack_err ON package_files(package_id) WHERE role = 'unpack_error';
+CREATE INDEX IF NOT EXISTS idx_package_files_package ON package_files(package_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_package_files_original ON package_files(package_id) WHERE role = 'original';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_package_files_unpack_err ON package_files(package_id) WHERE role = 'unpack_error';

@@ -1,0 +1,323 @@
+# Локальный стенд: 3 шарда × 50 MB seal threshold, 10 поставщиков, Prometheus + Grafana.
+#
+# Запуск (без реплик, по умолчанию):
+#   docker compose -f deploy/docker-compose.local.yml up -d --build
+#
+# С репликами и segment sync:
+#   docker compose -f deploy/docker-compose.local.yml -f deploy/docker-compose.local.replica.yml --profile replica up -d --build
+#
+# UI: Grafana http://localhost:3000 (admin/lbf), Prometheus http://localhost:9090
+
+services:
+  coordinator-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: coordinator
+    volumes:
+      - coordinator-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d coordinator"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: coordinator
+    ports:
+      - "8080:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      COORDINATOR_PG_DSN: postgres://lbf:lbf@coordinator-db:5432/coordinator?sslmode=disable
+      COORDINATOR_BOOTSTRAP: /app/deploy/shards.local.json
+      COORDINATOR_MIGRATIONS_PATH: /app/migrations/coordinator
+      SHARD_MAX_BYTES: "52428800"
+      SEAL_CHECK_INTERVAL: 5s
+      MAX_BODY_BYTES: "67108864"
+    depends_on:
+      coordinator-db:
+        condition: service_healthy
+      shard-0-primary:
+        condition: service_started
+      shard-1-primary:
+        condition: service_started
+      shard-2-primary:
+        condition: service_started
+    volumes:
+      - ../deploy/shards.local.json:/app/deploy/shards.local.json:ro
+
+  shard-0-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: lbf_shard0
+    volumes:
+      - shard0-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d lbf_shard0"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shard-0-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment: &shard0-env
+      HTTP_ADDR: ":8080"
+      SHARD_ID: "0"
+      SHARD_ROLE: primary
+      PG_DSN: postgres://lbf:lbf@shard-0-db:5432/lbf_shard0?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      DEDUP_BACKEND: memory
+      MIGRATIONS_PATH: /app/migrations
+      EXAMPLES_DIR: /app/examples
+      COMPRESSION_ENABLED: "true"
+      DEDUP_REBUILD_ON_START: "true"
+    volumes:
+      - shard0-segments:/data/segments
+      - shard0-rocksdb:/data/rocksdb
+    depends_on:
+      shard-0-db:
+        condition: service_healthy
+
+  shard-0-replica:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      <<: *shard0-env
+      SHARD_ROLE: replica
+      SHARD_READ_ONLY: "true"
+    volumes:
+      - shard0-replica-segments:/data/segments
+      - shard0-replica-rocksdb:/data/rocksdb
+    depends_on:
+      shard-0-db:
+        condition: service_healthy
+      shard-0-primary:
+        condition: service_started
+
+  shard-0-sync:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: shard-sync
+    environment:
+      SYNC_PRIMARY_URL: http://shard-0-primary:8080
+      DATA_DIR: /data/segments
+      SYNC_INTERVAL: 5s
+    volumes:
+      - shard0-replica-segments:/data/segments
+    depends_on:
+      - shard-0-primary
+      - shard-0-replica
+
+  shard-1-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: lbf_shard1
+    volumes:
+      - shard1-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d lbf_shard1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shard-1-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment: &shard1-env
+      HTTP_ADDR: ":8080"
+      SHARD_ID: "1"
+      SHARD_ROLE: primary
+      PG_DSN: postgres://lbf:lbf@shard-1-db:5432/lbf_shard1?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      DEDUP_BACKEND: memory
+      MIGRATIONS_PATH: /app/migrations
+      EXAMPLES_DIR: /app/examples
+      COMPRESSION_ENABLED: "true"
+      DEDUP_REBUILD_ON_START: "true"
+    volumes:
+      - shard1-segments:/data/segments
+      - shard1-rocksdb:/data/rocksdb
+    depends_on:
+      shard-1-db:
+        condition: service_healthy
+
+  shard-1-replica:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      <<: *shard1-env
+      SHARD_ROLE: replica
+      SHARD_READ_ONLY: "true"
+    volumes:
+      - shard1-replica-segments:/data/segments
+      - shard1-replica-rocksdb:/data/rocksdb
+    depends_on:
+      shard-1-db:
+        condition: service_healthy
+      shard-1-primary:
+        condition: service_started
+
+  shard-1-sync:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: shard-sync
+    environment:
+      SYNC_PRIMARY_URL: http://shard-1-primary:8080
+      DATA_DIR: /data/segments
+      SYNC_INTERVAL: 5s
+    volumes:
+      - shard1-replica-segments:/data/segments
+    depends_on:
+      - shard-1-primary
+      - shard-1-replica
+
+  shard-2-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: lbf_shard2
+    volumes:
+      - shard2-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d lbf_shard2"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shard-2-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment: &shard2-env
+      HTTP_ADDR: ":8080"
+      SHARD_ID: "2"
+      SHARD_ROLE: primary
+      PG_DSN: postgres://lbf:lbf@shard-2-db:5432/lbf_shard2?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      DEDUP_BACKEND: memory
+      MIGRATIONS_PATH: /app/migrations
+      EXAMPLES_DIR: /app/examples
+      COMPRESSION_ENABLED: "true"
+      DEDUP_REBUILD_ON_START: "true"
+    volumes:
+      - shard2-segments:/data/segments
+      - shard2-rocksdb:/data/rocksdb
+    depends_on:
+      shard-2-db:
+        condition: service_healthy
+
+  shard-2-replica:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      <<: *shard2-env
+      SHARD_ROLE: replica
+      SHARD_READ_ONLY: "true"
+    volumes:
+      - shard2-replica-segments:/data/segments
+      - shard2-replica-rocksdb:/data/rocksdb
+    depends_on:
+      shard-2-db:
+        condition: service_healthy
+      shard-2-primary:
+        condition: service_started
+
+  shard-2-sync:
+    profiles: [replica]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: shard-sync
+    environment:
+      SYNC_PRIMARY_URL: http://shard-2-primary:8080
+      DATA_DIR: /data/segments
+      SYNC_INTERVAL: 5s
+    volumes:
+      - shard2-replica-segments:/data/segments
+    depends_on:
+      - shard-2-primary
+      - shard-2-replica
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+      - --enable-feature=promql-experimental-functions
+    depends_on:
+      - coordinator
+      - shard-0-primary
+      - shard-1-primary
+      - shard-2-primary
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: lbf
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  coordinator-pg:
+  shard0-pg:
+  shard0-segments:
+  shard0-rocksdb:
+  shard0-replica-segments:
+  shard0-replica-rocksdb:
+  shard1-pg:
+  shard1-segments:
+  shard1-rocksdb:
+  shard1-replica-segments:
+  shard1-replica-rocksdb:
+  shard2-pg:
+  shard2-segments:
+  shard2-rocksdb:
+  shard2-replica-segments:
+  shard2-replica-rocksdb:
+  prometheus-data:
+  grafana-data:

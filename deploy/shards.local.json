@@ -1,0 +1,17 @@
+[
+  {
+    "shard_id": 0,
+    "state": "active",
+    "primary_url": "http://shard-0-primary:8080"
+  },
+  {
+    "shard_id": 1,
+    "state": "standby",
+    "primary_url": "http://shard-1-primary:8080"
+  },
+  {
+    "shard_id": 2,
+    "state": "standby",
+    "primary_url": "http://shard-2-primary:8080"
+  }
+]

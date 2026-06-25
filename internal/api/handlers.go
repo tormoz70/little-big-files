@@ -13,7 +13,9 @@ import (
 	"github.com/little-big-files/little-big-files/internal/config"
 	"github.com/little-big-files/little-big-files/internal/ingestion"
 	"github.com/little-big-files/little-big-files/internal/metadata"
+	"github.com/little-big-files/little-big-files/internal/metrics"
 	"github.com/little-big-files/little-big-files/internal/storage"
+	"github.com/little-big-files/little-big-files/internal/supplier"
 )
 
 type Server struct {
@@ -21,20 +23,35 @@ type Server struct {
 	ingest *ingestion.Service
 	repo   metadata.Repository
 	blobs  *storage.BlobStore
+	guard  *ShardGuard
 }
 
 func NewServer(cfg config.Config, ingest *ingestion.Service, repo metadata.Repository, blobs *storage.BlobStore) *Server {
 	return &Server{cfg: cfg, ingest: ingest, repo: repo, blobs: blobs}
 }
 
+// NewShardServer creates a server with shard guard and internal endpoints.
+func NewShardServer(cfg config.Config, ingest *ingestion.Service, repo metadata.Repository, blobs *storage.BlobStore, segments *storage.SegmentManager) *Server {
+	s := NewServer(cfg, ingest, repo, blobs)
+	s.guard = NewShardGuard(cfg.ShardID, cfg.ShardRole, cfg.ShardReadOnly, segments)
+	return s
+}
+
+func (s *Server) ShardGuard() *ShardGuard { return s.guard }
+
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Logger, middleware.Recoverer)
+	r.Use(middleware.RequestID, middleware.RealIP, middleware.Logger, middleware.Recoverer, metrics.Middleware)
+	if s.guard != nil {
+		r.Use(s.guard.middleware)
+	}
 
 	r.Post("/v1/packages", s.postPackage)
 	r.Get("/v1/packages/{id}", s.getPackage)
 	r.Get("/v1/packages/{id}/files/{file_id}", s.getFile)
 	r.Get("/v1/packages/{id}/original", s.getOriginal)
+	s.mountInternal(r, s.guard)
+	r.Handle("/metrics", metrics.Handler())
 	return r
 }
 
@@ -71,7 +88,7 @@ type packageResponse struct {
 }
 
 func (s *Server) postPackage(w http.ResponseWriter, r *http.Request) {
-	supplierID, err := parseSupplierID(r)
+	supplierID, err := supplier.ParseQuery(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
@@ -260,18 +277,6 @@ func contentTypeFor(role, filename string) string {
 		return "application/zip"
 	}
 	return "application/octet-stream"
-}
-
-func parseSupplierID(r *http.Request) (int, error) {
-	v := r.URL.Query().Get("supplier_id")
-	if v == "" {
-		return 0, fmt.Errorf("supplier_id is required")
-	}
-	id, err := strconv.Atoi(v)
-	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("invalid supplier_id")
-	}
-	return id, nil
 }
 
 func parsePackageID(r *http.Request) (int64, error) {

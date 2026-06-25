@@ -12,13 +12,14 @@ import (
 )
 
 type BlobStore struct {
-	segments *SegmentManager
-	encoder  *compress.Encoder
-	index    *dedup.HotIndex
+	segments     *SegmentManager
+	segmentIndex *SegmentIndex
+	encoder      *compress.Encoder
+	index        *dedup.HotIndex
 }
 
-func NewBlobStore(segments *SegmentManager, encoder *compress.Encoder, index *dedup.HotIndex) *BlobStore {
-	return &BlobStore{segments: segments, encoder: encoder, index: index}
+func NewBlobStore(segments *SegmentManager, segmentIndex *SegmentIndex, encoder *compress.Encoder, index *dedup.HotIndex) *BlobStore {
+	return &BlobStore{segments: segments, segmentIndex: segmentIndex, encoder: encoder, index: index}
 }
 
 func ContentHash(data []byte) []byte {
@@ -44,11 +45,11 @@ func (b *BlobStore) encodeRecord(data []byte, recordType RecordType) []byte {
 
 // StoreOrRef persists new content or increments ref_count for an existing blob.
 // The second return value is true when a new blob was written.
-func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte, recordType RecordType) ([]byte, bool, error) {
+func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte, recordType RecordType, supplierID int) ([]byte, bool, error) {
 	hash := ContentHash(data)
 
 	if b.index != nil && !b.index.MightContain(hash) {
-		return b.storeNew(ctx, tx, hash, data, recordType)
+		return b.storeNew(ctx, tx, hash, data, recordType, supplierID)
 	}
 
 	if b.index != nil {
@@ -73,19 +74,39 @@ func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte,
 		return hash, false, nil
 	}
 
-	return b.storeNew(ctx, tx, hash, data, recordType)
+	return b.storeNew(ctx, tx, hash, data, recordType, supplierID)
 }
 
-func (b *BlobStore) storeNew(ctx context.Context, tx metadata.Tx, hash, data []byte, recordType RecordType) ([]byte, bool, error) {
+func (b *BlobStore) storeNew(ctx context.Context, tx metadata.Tx, hash, data []byte, recordType RecordType, supplierID int) ([]byte, bool, error) {
 	record := b.encodeRecord(data, recordType)
 	loc, err := b.segments.Append(record)
 	if err != nil {
 		return nil, false, err
 	}
 
+	magic, _, _ := DecodeRecordHeader(record)
+	var dictID uint32
+	if b.encoder != nil && IsCompressedXML(magic) {
+		dictID = uint32(b.encoder.DictID())
+	}
+	if b.segmentIndex != nil {
+		var h [32]byte
+		copy(h[:], hash)
+		_ = b.segmentIndex.Append(loc.SegmentID, IndexEntry{
+			Offset:      loc.Offset,
+			StoredSize:  uint32(len(record)),
+			LogicalSize: uint32(len(data)),
+			Magic:       magic,
+			Hash:        h,
+			SupplierID:  uint32(supplierID),
+			DictID:      dictID,
+		})
+	}
+
 	blob := metadata.ContentBlob{
 		ContentHash: hash,
 		Size:        len(data),
+		StoredSize:  len(record),
 		SegmentID:   loc.SegmentID,
 		Offset:      loc.Offset,
 		RefCount:    1,

@@ -1,0 +1,252 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "HTTP request rate (Coordinator)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(lbf_http_requests_total{job=\"coordinator\"}[1m])) by (route, code)",
+          "legendFormat": "{{route}} {{code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "HTTP latency p95 (Coordinator)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(lbf_http_request_duration_seconds_bucket{job=\"coordinator\"}[5m])) by (le, route))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Shard segment bytes (primary)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "lbf_shard_total_bytes{job=\"shards\", role=\"primary\"}",
+          "legendFormat": "shard {{shard_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Active shard bytes vs seal threshold",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "lbf_coordinator_shard_bytes{job=\"coordinator\", state=\"active\"}",
+          "legendFormat": "active shard {{shard_id}}",
+          "refId": "A"
+        },
+        {
+          "expr": "lbf_coordinator_shard_max_bytes{job=\"coordinator\"}",
+          "legendFormat": "seal threshold",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "#6e6e6e" },
+          "decimals": 0,
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "#6e6e6e", "value": null }]
+          },
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/· active$/" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "/· sealed$/" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "/· standby$/" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#6e6e6e", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "Last 4 shards by state",
+      "description": "Заполнение = % от seal. Цвет по state. Порядок фиксируется по shard_id через sort_by_label (слева→направо 0,1,2).",
+      "type": "gauge",
+      "pluginVersion": "11.4.0",
+      "options": {
+        "minVizHeight": 80,
+        "minVizWidth": 56,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": false,
+        "sizing": "auto",
+        "text": {
+          "titleSize": 14,
+          "valueSize": 22
+        }
+      },
+      "targets": [
+        {
+          "expr": "sort_by_label(100 * lbf_coordinator_shard_bar_bytes{job=\"coordinator\"} / scalar(max(lbf_coordinator_shard_max_bytes{job=\"coordinator\"})), \"shard_id\")",
+          "instant": true,
+          "legendFormat": "{{shard_id}} · {{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 16 },
+      "id": 6,
+      "title": "Shard registry",
+      "type": "table",
+      "targets": [
+        {
+          "expr": "lbf_coordinator_shard_info{job=\"coordinator\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
+      "id": 7,
+      "title": "HTTP request rate (shards)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(lbf_http_requests_total{job=\"shards\"}[1m])) by (shard_id, role, route)",
+          "legendFormat": "s{{shard_id}} {{role}} {{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 14, "x": 0, "y": 30 },
+      "id": 8,
+      "title": "Logical vs stored vs segment bytes (primary)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "lbf_shard_blob_logical_bytes{job=\"shards\", role=\"primary\"}",
+          "legendFormat": "logical unique s{{shard_id}}",
+          "refId": "A"
+        },
+        {
+          "expr": "lbf_shard_blob_stored_bytes{job=\"shards\", role=\"primary\"}",
+          "legendFormat": "stored records s{{shard_id}}",
+          "refId": "B"
+        },
+        {
+          "expr": "lbf_shard_blob_referenced_logical_bytes{job=\"shards\", role=\"primary\"}",
+          "legendFormat": "referenced logical s{{shard_id}}",
+          "refId": "C"
+        },
+        {
+          "expr": "lbf_shard_total_bytes{job=\"shards\", role=\"primary\"}",
+          "legendFormat": "segment files s{{shard_id}}",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "h": 8, "w": 5, "x": 14, "y": 30 },
+      "id": 9,
+      "title": "Compression savings",
+      "description": "Сколько % места сэкономил Zstd на уникальных blob: (1 − stored/logical) × 100. 44% ≈ ratio 1.80.",
+      "type": "stat",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "expr": "lbf_shard_compression_savings_percent{job=\"shards\", role=\"primary\"} and on(shard_id) (lbf_coordinator_shard_info{job=\"coordinator\", state=\"active\"} == 1)",
+          "legendFormat": "active shard {{shard_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2
+        }
+      },
+      "gridPos": { "h": 8, "w": 5, "x": 19, "y": 30 },
+      "id": 10,
+      "title": "Storage efficiency",
+      "description": "referenced logical / segment bytes. >1 = dedup + compression combined.",
+      "type": "stat",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "expr": "lbf_shard_storage_efficiency_ratio{job=\"shards\", role=\"primary\"} and on(shard_id) (lbf_coordinator_shard_info{job=\"coordinator\", state=\"active\"} == 1)",
+          "legendFormat": "active shard {{shard_id}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["lbf", "local-stand"],
+  "time": { "from": "now-15m", "to": "now" },
+  "title": "LBF Local Stand",
+  "uid": "lbf-local",
+  "version": 22
+}

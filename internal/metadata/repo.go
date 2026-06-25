@@ -75,10 +75,10 @@ type pgTx struct {
 
 func (t *pgTx) GetBlob(ctx context.Context, hash []byte) (*ContentBlob, error) {
 	row := t.tx.QueryRow(ctx, `
-		SELECT content_hash, size, segment_id, offset, ref_count, first_seen_at
+		SELECT content_hash, size, stored_size, segment_id, "offset", ref_count, first_seen_at
 		FROM content_blobs WHERE content_hash = $1`, hash)
 	var b ContentBlob
-	err := row.Scan(&b.ContentHash, &b.Size, &b.SegmentID, &b.Offset, &b.RefCount, &b.FirstSeenAt)
+	err := row.Scan(&b.ContentHash, &b.Size, &b.StoredSize, &b.SegmentID, &b.Offset, &b.RefCount, &b.FirstSeenAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -94,9 +94,9 @@ func (t *pgTx) GetBlobByHash(ctx context.Context, hash []byte) (*ContentBlob, er
 
 func (t *pgTx) InsertBlob(ctx context.Context, blob ContentBlob) error {
 	_, err := t.tx.Exec(ctx, `
-		INSERT INTO content_blobs (content_hash, size, segment_id, offset, ref_count, first_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		blob.ContentHash, blob.Size, blob.SegmentID, blob.Offset, blob.RefCount, blob.FirstSeenAt)
+		INSERT INTO content_blobs (content_hash, size, stored_size, segment_id, "offset", ref_count, first_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		blob.ContentHash, blob.Size, blob.StoredSize, blob.SegmentID, blob.Offset, blob.RefCount, blob.FirstSeenAt)
 	return err
 }
 
@@ -324,10 +324,10 @@ func (r *PostgresRepository) CountContentBlobs(ctx context.Context) (int64, erro
 
 func (r *PostgresRepository) GetBlob(ctx context.Context, hash []byte) (*ContentBlob, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT content_hash, size, segment_id, offset, ref_count, first_seen_at
+		SELECT content_hash, size, stored_size, segment_id, "offset", ref_count, first_seen_at
 		FROM content_blobs WHERE content_hash = $1`, hash)
 	var b ContentBlob
-	err := row.Scan(&b.ContentHash, &b.Size, &b.SegmentID, &b.Offset, &b.RefCount, &b.FirstSeenAt)
+	err := row.Scan(&b.ContentHash, &b.Size, &b.StoredSize, &b.SegmentID, &b.Offset, &b.RefCount, &b.FirstSeenAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -362,7 +362,7 @@ func (r *PostgresRepository) SaveDictionary(ctx context.Context, dict []byte, en
 
 func (r *PostgresRepository) ListContentBlobs(ctx context.Context) ([]ContentBlob, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT content_hash, size, segment_id, offset, ref_count, first_seen_at
+		SELECT content_hash, size, stored_size, segment_id, "offset", ref_count, first_seen_at
 		FROM content_blobs ORDER BY first_seen_at`)
 	if err != nil {
 		return nil, err
@@ -372,12 +372,108 @@ func (r *PostgresRepository) ListContentBlobs(ctx context.Context) ([]ContentBlo
 	var out []ContentBlob
 	for rows.Next() {
 		var b ContentBlob
-		if err := rows.Scan(&b.ContentHash, &b.Size, &b.SegmentID, &b.Offset, &b.RefCount, &b.FirstSeenAt); err != nil {
+		if err := rows.Scan(&b.ContentHash, &b.Size, &b.StoredSize, &b.SegmentID, &b.Offset, &b.RefCount, &b.FirstSeenAt); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+
+func (r *PostgresRepository) UpsertContentBlob(ctx context.Context, blob ContentBlob) error {
+	stored := blob.StoredSize
+	if stored == 0 {
+		stored = blob.Size
+	}
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO content_blobs (content_hash, size, stored_size, segment_id, "offset", ref_count, first_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (content_hash) DO UPDATE SET
+			size = EXCLUDED.size,
+			stored_size = EXCLUDED.stored_size,
+			segment_id = EXCLUDED.segment_id,
+			"offset" = EXCLUDED."offset"`,
+		blob.ContentHash, blob.Size, stored, blob.SegmentID, blob.Offset, blob.RefCount, blob.FirstSeenAt)
+	return err
+}
+
+func (r *PostgresRepository) RestorePackage(ctx context.Context, p Package) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO packages (
+			id, supplier_id, received_at, package_hash, payload_type, storage_mode,
+			original_filename, canonical_package_id, file_count, unpack_error
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE SET
+			supplier_id = EXCLUDED.supplier_id,
+			received_at = EXCLUDED.received_at,
+			package_hash = EXCLUDED.package_hash,
+			payload_type = EXCLUDED.payload_type,
+			storage_mode = EXCLUDED.storage_mode,
+			original_filename = EXCLUDED.original_filename,
+			canonical_package_id = EXCLUDED.canonical_package_id,
+			file_count = EXCLUDED.file_count,
+			unpack_error = EXCLUDED.unpack_error`,
+		p.ID, p.SupplierID, p.ReceivedAt, p.PackageHash, p.PayloadType, p.StorageMode,
+		p.OriginalFilename, p.CanonicalPackageID, p.FileCount, p.UnpackError)
+	return err
+}
+
+func (r *PostgresRepository) RestorePackageFile(ctx context.Context, f PackageFile) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO package_files (id, package_id, blob_hash, role, original_filename, sequence_number)
+		VALUES ($1,$2,$3,$4,$5,$6)
+		ON CONFLICT (id) DO UPDATE SET
+			package_id = EXCLUDED.package_id,
+			blob_hash = EXCLUDED.blob_hash,
+			role = EXCLUDED.role,
+			original_filename = EXCLUDED.original_filename,
+			sequence_number = EXCLUDED.sequence_number`,
+		f.ID, f.PackageID, f.BlobHash, f.Role, f.OriginalFilename, f.SequenceNumber)
+	return err
+}
+
+func (r *PostgresRepository) TruncateRecoveryTables(ctx context.Context) error {
+	_, err := r.pool.Exec(ctx, `TRUNCATE package_files, packages, content_blobs, supplier_stats RESTART IDENTITY CASCADE`)
+	return err
+}
+
+func (r *PostgresRepository) RecomputeRefCounts(ctx context.Context) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE content_blobs b SET ref_count = COALESCE(x.cnt, 0)
+		FROM (
+			SELECT blob_hash, COUNT(*)::bigint AS cnt FROM package_files GROUP BY blob_hash
+		) x
+		WHERE b.content_hash = x.blob_hash`)
+	return err
+}
+
+func (r *PostgresRepository) ResetIDSequences(ctx context.Context) error {
+	stmts := []string{
+		`SELECT setval(pg_get_serial_sequence('packages','id'), COALESCE((SELECT MAX(id) FROM packages), 1))`,
+		`SELECT setval(pg_get_serial_sequence('package_files','id'), COALESCE((SELECT MAX(id) FROM package_files), 1))`,
+	}
+	for _, s := range stmts {
+		if _, err := r.pool.Exec(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) BlobByteTotals(ctx context.Context) (BlobByteTotals, error) {
+	var totals BlobByteTotals
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(size), 0),
+			COALESCE(SUM(CASE WHEN stored_size > 0 THEN stored_size ELSE size END), 0),
+			COALESCE(SUM(size * ref_count), 0)
+		FROM content_blobs`).Scan(
+		&totals.LogicalBytes,
+		&totals.StoredBytes,
+		&totals.ReferencedLogicalBytes,
+	)
+	return totals, err
 }
 
 func (r *PostgresRepository) RecordSupplierIngest(ctx context.Context, supplierID, fileCount, newBlobs, duplicateRefs int) error {

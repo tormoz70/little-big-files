@@ -6,6 +6,7 @@ import (
 
 	"github.com/little-big-files/little-big-files/internal/config"
 	"github.com/little-big-files/little-big-files/internal/metadata"
+	"github.com/little-big-files/little-big-files/internal/recovery"
 	"github.com/little-big-files/little-big-files/internal/storage"
 )
 
@@ -29,6 +30,7 @@ type Service struct {
 	cfg         config.Config
 	repo        metadata.Repository
 	blobs       *storage.BlobStore
+	journal     *recovery.Journal
 	unpackQueue *UnpackQueue
 }
 
@@ -38,6 +40,26 @@ func NewService(cfg config.Config, repo metadata.Repository, blobs *storage.Blob
 
 func (s *Service) SetUnpackQueue(q *UnpackQueue) {
 	s.unpackQueue = q
+}
+
+func (s *Service) SetJournal(j *recovery.Journal) {
+	s.journal = j
+}
+
+func (s *Service) journalPackage(pkg *metadata.Package) {
+	if s.journal == nil || pkg == nil {
+		return
+	}
+	_ = s.journal.Append(recovery.EntryFromPackage(pkg))
+}
+
+func (s *Service) loadAndJournal(ctx context.Context, packageID int64) (*metadata.Package, error) {
+	pkg, err := s.repo.GetPackage(ctx, packageID)
+	if err != nil {
+		return nil, err
+	}
+	s.journalPackage(pkg)
+	return pkg, nil
 }
 
 type ProcessResult struct {
@@ -126,14 +148,14 @@ func (s *Service) clonePackage(ctx context.Context, supplierID int, pkgHash []by
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.GetPackage(ctx, packageID)
+	return s.loadAndJournal(ctx, packageID)
 }
 
 func (s *Service) ingestXML(ctx context.Context, supplierID int, pkgHash, body []byte, filename *string) (*metadata.Package, error) {
 	var packageID int64
 	var counters ingestCounters
 	err := s.repo.WithTx(ctx, func(tx metadata.Tx) error {
-		hash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordXML)
+		hash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordXML, supplierID)
 		if err != nil {
 			return err
 		}
@@ -161,7 +183,7 @@ func (s *Service) ingestXML(ctx context.Context, supplierID int, pkgHash, body [
 		return nil, err
 	}
 	s.recordIngest(ctx, supplierID, 1, counters, false)
-	return s.repo.GetPackage(ctx, packageID)
+	return s.loadAndJournal(ctx, packageID)
 }
 
 func (s *Service) ingestZIP(ctx context.Context, supplierID int, pkgHash, body []byte, filename *string) (*metadata.Package, error) {
@@ -183,7 +205,7 @@ func (s *Service) ingestLargeZIP(ctx context.Context, supplierID int, pkgHash, b
 	var packageID int64
 	var counters ingestCounters
 	err := s.repo.WithTx(ctx, func(tx metadata.Tx) error {
-		hash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP)
+		hash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP, supplierID)
 		if err != nil {
 			return err
 		}
@@ -214,7 +236,7 @@ func (s *Service) ingestLargeZIP(ctx context.Context, supplierID int, pkgHash, b
 	if s.cfg.LargeZipAsyncUnpack && s.unpackQueue != nil {
 		s.unpackQueue.Enqueue(packageID)
 	}
-	return s.repo.GetPackage(ctx, packageID)
+	return s.loadAndJournal(ctx, packageID)
 }
 
 func (s *Service) ingestSmallZIP(ctx context.Context, supplierID int, pkgHash, body []byte, filename *string) (*metadata.Package, error) {
@@ -232,7 +254,7 @@ func (s *Service) ingestSmallZIP(ctx context.Context, supplierID int, pkgHash, b
 	var packageID int64
 	var counters ingestCounters
 	err := s.repo.WithTx(ctx, func(tx metadata.Tx) error {
-		zipHash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP)
+		zipHash, created, err := s.blobs.StoreOrRef(ctx, tx, body, storage.RecordZIP, supplierID)
 		if err != nil {
 			return err
 		}
@@ -260,12 +282,12 @@ func (s *Service) ingestSmallZIP(ctx context.Context, supplierID int, pkgHash, b
 			return err
 		}
 
-		_, _, err = persistZipMembers(ctx, tx, s.blobs, packageID, members, unpackErr, &counters)
+		_, _, err = persistZipMembers(ctx, tx, s.blobs, packageID, supplierID, members, unpackErr, &counters)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.recordIngest(ctx, supplierID, fileCount, counters, false)
-	return s.repo.GetPackage(ctx, packageID)
+	return s.loadAndJournal(ctx, packageID)
 }

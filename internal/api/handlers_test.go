@@ -32,7 +32,7 @@ func setupHandlerEnv(t *testing.T) *handlerEnv {
 	t.Cleanup(func() { _ = segments.Close() })
 
 	cfg := config.Config{MaxBodyBytes: 16 * 1024 * 1024, ZipThresholdSize: 102400, ZipThresholdCount: 100}
-	blobs := storage.NewBlobStore(segments, nil, nil)
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
 	ingest := ingestion.NewService(cfg, repo, blobs)
 	srv := api.NewServer(cfg, ingest, repo, blobs)
 	return &handlerEnv{server: srv, repo: repo}

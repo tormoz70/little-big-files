@@ -27,7 +27,7 @@ func TestLargeZipAsyncUnpack(t *testing.T) {
 		ZipThresholdCount:     100,
 		LargeZipAsyncUnpack: true,
 	}
-	blobs := storage.NewBlobStore(segments, nil, nil)
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
 	svc := ingestion.NewService(cfg, repo, blobs)
 	q := ingestion.NewUnpackQueue(svc, 1, 8)
 	svc.SetUnpackQueue(q)
