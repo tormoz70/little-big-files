@@ -29,6 +29,8 @@ Environment:
 | `ZIP_THRESHOLD_COUNT` | `100` files |
 | `WRITE_BUFFER_MAX_BYTES` | `4194304` (4 MB) — batch segment writes |
 | `WRITE_BUFFER_INTERVAL` | `100ms` — max delay before flush |
+| `VERIFY_CHECKSUM` | `true` — verify per-record CRC32C on read |
+| `UNPACK_RECOVER_INTERVAL` | `1m` — re-scan packages stuck in `raw_large` and re-enqueue unpack |
 | `COMPRESSION_ENABLED` | `true` — Zstd dictionary compression for XML |
 | `COMPRESSION_MIN_SIZE` | `64` — minimum payload size to compress |
 | `EXAMPLES_DIR` | `./examples` — ZIP samples for dictionary training |
@@ -89,6 +91,8 @@ Hot-add and manual switching API:
 
 - `POST /v1/admin/shards` — shard startup registration / idempotent upsert by `shard_uuid`
 - `PATCH /v1/admin/shards/{id}/state` — safe manual state transition (`standby -> active` requires `confirm=true`)
+
+Shard-internal endpoints (`/v1/internal/*`: stats, seal, raw segment download/sync) require the cluster key, sent as `X-Cluster-Key: <key>` (or `Authorization: Bearer <key>`). The key is taken from `CLUSTER_KEY`, falling back to `SHARD_CLUSTER_KEY`. If neither is configured these endpoints are disabled (`503`). `shard-sync` sends the key automatically.
 
 **Подробное описание стенда:** [docs/test-stand.md](docs/test-stand.md) — VM, контейнеры, сценарии проверки, seal, troubleshooting.
 

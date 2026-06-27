@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ type Location struct {
 type SegmentManager struct {
 	dir            string
 	maxSegmentSize int64
+	verifyChecksum bool
 	mu             sync.Mutex
 	activeID       int
 	activeFile     *os.File
@@ -34,6 +37,7 @@ func NewSegmentManager(dir string, maxSegmentSize int64) (*SegmentManager, error
 	sm := &SegmentManager{
 		dir:            dir,
 		maxSegmentSize: maxSegmentSize,
+		verifyChecksum: true,
 		readFiles:      make(map[int]*os.File),
 	}
 	if err := sm.recover(); err != nil {
@@ -44,6 +48,12 @@ func NewSegmentManager(dir string, maxSegmentSize int64) (*SegmentManager, error
 
 func (sm *SegmentManager) SetWriteBuffer(wb *WriteBuffer) {
 	sm.buffer = wb
+}
+
+// SetVerifyChecksum toggles per-record CRC verification on the read path.
+// The checksum trailer is always written regardless of this setting.
+func (sm *SegmentManager) SetVerifyChecksum(v bool) {
+	sm.verifyChecksum = v
 }
 
 func (sm *SegmentManager) recover() error {
@@ -78,12 +88,17 @@ func truncateToValid(data []byte) ([]byte, uint32, int64) {
 		if len(data)-int(offset) < HeaderSize {
 			break
 		}
-		_, size, err := DecodeRecordHeader(data[offset:])
-		if err != nil || size == 0 {
+		magic, size, err := DecodeRecordHeader(data[offset:])
+		if err != nil || size == 0 || !KnownMagic(magic) {
 			break
 		}
-		recordEnd := offset + int64(HeaderSize) + int64(size)
+		recordEnd := offset + int64(HeaderSize) + int64(size) + int64(ChecksumSize)
 		if recordEnd > int64(len(data)) {
+			break
+		}
+		payload := data[offset+int64(HeaderSize) : offset+int64(HeaderSize)+int64(size)]
+		storedCRC := binary.LittleEndian.Uint32(data[offset+int64(HeaderSize)+int64(size) : recordEnd])
+		if RecordChecksum(payload) != storedCRC {
 			break
 		}
 		count++
@@ -151,9 +166,9 @@ func (sm *SegmentManager) openSegmentFile(id int) error {
 	return nil
 }
 
-func (sm *SegmentManager) Append(record []byte) (Location, error) {
+func (sm *SegmentManager) Append(ctx context.Context, record []byte) (Location, error) {
 	if sm.buffer != nil {
-		return sm.buffer.Append(record)
+		return sm.buffer.Append(ctx, record)
 	}
 	return sm.appendDirect(record)
 }
@@ -164,24 +179,35 @@ func (sm *SegmentManager) appendDirect(record []byte) (Location, error) {
 	return sm.appendLocked(record, true)
 }
 
-func (sm *SegmentManager) batchAppend(batch []*pendingWrite) ([]Location, error) {
+// batchAppend writes every record in the batch and records the per-record
+// outcome (loc/err) on each pendingWrite, then issues a single fsync. A failure
+// on one record does not abort the others, so unrelated requests sharing a batch
+// are not failed together. A failed fsync marks all otherwise-successful records
+// in the batch as failed (their durability is not guaranteed).
+func (sm *SegmentManager) batchAppend(batch []*pendingWrite) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	locs := make([]Location, len(batch))
-	for i, pw := range batch {
+	wrote := false
+	for _, pw := range batch {
 		loc, err := sm.appendLocked(pw.record, false)
 		if err != nil {
-			return nil, err
+			pw.err = err
+			continue
 		}
-		locs[i] = loc
+		pw.loc = loc
+		wrote = true
 	}
-	if sm.activeFile != nil {
+	if wrote && sm.activeFile != nil {
 		if err := sm.activeFile.Sync(); err != nil {
-			return nil, fmt.Errorf("batch fsync: %w", err)
+			syncErr := fmt.Errorf("batch fsync: %w", err)
+			for _, pw := range batch {
+				if pw.err == nil {
+					pw.err = syncErr
+				}
+			}
 		}
 	}
-	return locs, nil
 }
 
 func (sm *SegmentManager) appendLocked(record []byte, fsync bool) (Location, error) {
@@ -275,6 +301,18 @@ func (sm *SegmentManager) ReadRecord(segmentID int, offset int64) (magic uint32,
 	}
 	if int(n) != int(size) {
 		return 0, nil, fmt.Errorf("short payload read")
+	}
+
+	if sm.verifyChecksum {
+		trailer := make([]byte, ChecksumSize)
+		tn, terr := f.ReadAt(trailer, offset+HeaderSize+int64(size))
+		if terr != nil || tn != ChecksumSize {
+			return 0, nil, fmt.Errorf("read record checksum: %w", terr)
+		}
+		want := binary.LittleEndian.Uint32(trailer)
+		if RecordChecksum(payload) != want {
+			return 0, nil, fmt.Errorf("record checksum mismatch in segment %d at offset %d", segmentID, offset)
+		}
 	}
 	return magic, payload, nil
 }

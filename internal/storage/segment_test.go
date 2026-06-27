@@ -1,6 +1,7 @@
 package storage_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,7 +18,7 @@ func TestSegmentAppendAndRead(t *testing.T) {
 
 	payload := []byte("hello xml")
 	record := storage.EncodeRecord(storage.MagicXML, payload)
-	loc, err := sm.Append(record)
+	loc, err := sm.Append(context.Background(), record)
 	require.NoError(t, err)
 
 	data, err := sm.Read(loc)
@@ -54,17 +55,44 @@ func TestSegmentRotation(t *testing.T) {
 	require.NoError(t, err)
 	defer sm.Close()
 
-	record := storage.EncodeRecord(storage.MagicXML, []byte("012345678901234567890123456789012345678901234567890"))
-	loc1, err := sm.Append(record)
+	payload := []byte("012345678901234567890123456789012345678901234567890")
+	record := storage.EncodeRecord(storage.MagicXML, payload)
+	loc1, err := sm.Append(context.Background(), record)
 	require.NoError(t, err)
-	loc2, err := sm.Append(record)
+	loc2, err := sm.Append(context.Background(), record)
 	require.NoError(t, err)
 	require.Equal(t, 0, loc1.SegmentID)
 	require.Equal(t, 1, loc2.SegmentID)
 
 	data, err := sm.Read(loc2)
 	require.NoError(t, err)
-	require.Equal(t, record[storage.HeaderSize:], data)
+	require.Equal(t, payload, data)
+}
+
+func TestSegmentReadRecordChecksumMismatch(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+	defer sm.Close()
+
+	payload := []byte("corruptible payload bytes")
+	record := storage.EncodeRecord(storage.MagicXML, payload)
+	loc, err := sm.Append(context.Background(), record)
+	require.NoError(t, err)
+
+	// Simulate on-disk bit rot beneath the running manager (read handle is
+	// opened lazily on ReadRecord and picks up the corrupted file).
+	files, _ := os.ReadDir(dir)
+	require.Len(t, files, 1)
+	path := filepath.Join(dir, files[0].Name())
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	raw[storage.HeaderSize+3] ^= 0xFF
+	require.NoError(t, os.WriteFile(path, raw, 0o644))
+
+	_, _, err = sm.ReadRecord(loc.SegmentID, loc.Offset)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checksum")
 }
 
 func TestSegmentReadRecordMagic(t *testing.T) {
@@ -75,7 +103,7 @@ func TestSegmentReadRecordMagic(t *testing.T) {
 
 	payload := []byte("zip-data")
 	record := storage.EncodeRecord(storage.MagicZIP, payload)
-	loc, err := sm.Append(record)
+	loc, err := sm.Append(context.Background(), record)
 	require.NoError(t, err)
 
 	magic, data, err := sm.ReadRecord(loc.SegmentID, loc.Offset)

@@ -44,6 +44,7 @@ func main() {
 		slog.Error("segment manager failed", "err", err)
 		os.Exit(1)
 	}
+	segments.SetVerifyChecksum(cfg.VerifyChecksum)
 	defer segments.Close()
 
 	segmentIndex := storage.NewSegmentIndex(cfg.DataDir)
@@ -97,6 +98,7 @@ func main() {
 	if cfg.LargeZipAsyncUnpack && cfg.ShardRole != "replica" && !cfg.ShardReadOnly {
 		unpackQ = ingestion.NewUnpackQueue(ingest, cfg.UnpackWorkers, cfg.UnpackQueueSize)
 		ingest.SetUnpackQueue(unpackQ)
+		unpackQ.StartRecovery(cfg.UnpackRecoverInterval)
 		defer unpackQ.Shutdown()
 	}
 
