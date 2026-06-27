@@ -26,6 +26,7 @@ type shardStats struct {
 type Registry struct {
 	repo          *Repository
 	shardMaxBytes int64
+	clusterKey    string
 	client        *http.Client
 }
 
@@ -44,11 +45,19 @@ func (e *StatusError) Error() string {
 
 func (e *StatusError) Unwrap() error { return e.Cause }
 
-func NewRegistry(repo *Repository, shardMaxBytes int64) *Registry {
+func NewRegistry(repo *Repository, shardMaxBytes int64, clusterKey string) *Registry {
 	return &Registry{
 		repo:          repo,
 		shardMaxBytes: shardMaxBytes,
+		clusterKey:    clusterKey,
 		client:        &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+// setInternalAuth attaches the cluster key required by shard /v1/internal/* endpoints.
+func (reg *Registry) setInternalAuth(req *http.Request) {
+	if reg.clusterKey != "" {
+		req.Header.Set("X-Cluster-Key", reg.clusterKey)
 	}
 }
 
@@ -110,6 +119,7 @@ func (reg *Registry) FetchStats(ctx context.Context, baseURL string) (*shardStat
 	if err != nil {
 		return nil, err
 	}
+	reg.setInternalAuth(req)
 	resp, err := reg.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -131,6 +141,7 @@ func (reg *Registry) SealShard(ctx context.Context, shard *ShardInfo) error {
 	if err != nil {
 		return err
 	}
+	reg.setInternalAuth(req)
 	resp, err := reg.client.Do(req)
 	if err != nil {
 		_ = reg.repo.MarkShardUnreachable(ctx, shard.ShardID, err.Error())
