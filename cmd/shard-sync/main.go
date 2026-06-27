@@ -32,22 +32,34 @@ func main() {
 		}
 	}
 
+	clusterKey := cfg.ClusterKey
+	if clusterKey == "" {
+		clusterKey = cfg.ShardClusterKey
+	}
+
 	client := &http.Client{Timeout: 120 * time.Second}
 	ctx := context.Background()
 
 	for {
-		if err := syncOnce(ctx, client, primary, cfg.DataDir); err != nil {
+		if err := syncOnce(ctx, client, primary, clusterKey, cfg.DataDir); err != nil {
 			slog.Warn("segment sync failed", "err", err)
 		}
 		time.Sleep(interval)
 	}
 }
 
-func syncOnce(ctx context.Context, client *http.Client, primaryURL, dataDir string) error {
+func setClusterKey(req *http.Request, key string) {
+	if key != "" {
+		req.Header.Set("X-Cluster-Key", key)
+	}
+}
+
+func syncOnce(ctx context.Context, client *http.Client, primaryURL, clusterKey, dataDir string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, primaryURL+"/v1/internal/segments", nil)
 	if err != nil {
 		return err
 	}
+	setClusterKey(req, clusterKey)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -67,18 +79,19 @@ func syncOnce(ctx context.Context, client *http.Client, primaryURL, dataDir stri
 			continue
 		}
 		slog.Info("sync segment", "file", f.Name)
-		if err := downloadSegment(ctx, client, primaryURL, f.Name, dest); err != nil {
+		if err := downloadSegment(ctx, client, primaryURL, clusterKey, f.Name, dest); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func downloadSegment(ctx context.Context, client *http.Client, primaryURL, name, dest string) error {
+func downloadSegment(ctx context.Context, client *http.Client, primaryURL, clusterKey, name, dest string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, primaryURL+"/v1/internal/segments/"+name, nil)
 	if err != nil {
 		return err
 	}
+	setClusterKey(req, clusterKey)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

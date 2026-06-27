@@ -39,6 +39,58 @@ func TestInternalStats(t *testing.T) {
 	require.NoError(t, err)
 	defer segments.Close()
 
+	cfg := config.Config{ShardID: 3, ShardRole: "primary", MaxBodyBytes: 1024 * 1024, ClusterKey: "secret"}
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
+	ingest := ingestion.NewService(cfg, repo, blobs)
+	srv := api.NewShardServer(cfg, ingest, repo, blobs, segments)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/internal/stats", nil)
+	req.Header.Set("X-Cluster-Key", "secret")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestInternalRequiresClusterKey(t *testing.T) {
+	repo := testmetadata.NewMemoryRepository()
+	segDir := t.TempDir()
+	segments, err := storage.NewSegmentManager(segDir, 1024*1024)
+	require.NoError(t, err)
+	defer segments.Close()
+
+	cfg := config.Config{ShardID: 3, ShardRole: "primary", MaxBodyBytes: 1024 * 1024, ClusterKey: "secret"}
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
+	ingest := ingestion.NewService(cfg, repo, blobs)
+	srv := api.NewShardServer(cfg, ingest, repo, blobs, segments)
+
+	// missing key
+	req := httptest.NewRequest(http.MethodGet, "/v1/internal/segments", nil)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// wrong key
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/internal/segments", nil)
+	req2.Header.Set("X-Cluster-Key", "nope")
+	rec2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusUnauthorized, rec2.Code)
+
+	// seal without key must not change state
+	reqSeal := httptest.NewRequest(http.MethodPost, "/v1/internal/seal", nil)
+	recSeal := httptest.NewRecorder()
+	srv.Router().ServeHTTP(recSeal, reqSeal)
+	require.Equal(t, http.StatusUnauthorized, recSeal.Code)
+	require.False(t, srv.ShardGuard().ReadOnly())
+}
+
+func TestInternalDisabledWithoutClusterKey(t *testing.T) {
+	repo := testmetadata.NewMemoryRepository()
+	segDir := t.TempDir()
+	segments, err := storage.NewSegmentManager(segDir, 1024*1024)
+	require.NoError(t, err)
+	defer segments.Close()
+
 	cfg := config.Config{ShardID: 3, ShardRole: "primary", MaxBodyBytes: 1024 * 1024}
 	blobs := storage.NewBlobStore(segments, nil, nil, nil)
 	ingest := ingestion.NewService(cfg, repo, blobs)
@@ -47,7 +99,7 @@ func TestInternalStats(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/internal/stats", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
 func TestSealSetsReadOnly(t *testing.T) {
@@ -57,12 +109,13 @@ func TestSealSetsReadOnly(t *testing.T) {
 	require.NoError(t, err)
 	defer segments.Close()
 
-	cfg := config.Config{ShardID: 0, ShardRole: "primary", MaxBodyBytes: 1024 * 1024}
+	cfg := config.Config{ShardID: 0, ShardRole: "primary", MaxBodyBytes: 1024 * 1024, ClusterKey: "secret"}
 	blobs := storage.NewBlobStore(segments, nil, nil, nil)
 	ingest := ingestion.NewService(cfg, repo, blobs)
 	srv := api.NewShardServer(cfg, ingest, repo, blobs, segments)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/internal/seal", nil)
+	req.Header.Set("X-Cluster-Key", "secret")
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
