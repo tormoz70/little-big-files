@@ -54,6 +54,12 @@ func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobS
 	return 1 + len(members), nil, nil
 }
 
+// PendingLargePackageIDs returns packages still in raw_large state, used by the
+// unpack queue's recovery scan to re-enqueue work lost across restarts/drops.
+func (s *Service) PendingLargePackageIDs(ctx context.Context) ([]int64, error) {
+	return s.repo.ListPendingLargePackages(ctx)
+}
+
 // UnpackLargePackage unpacks a raw_large package in place and propagates members to early clones.
 func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error {
 	pkg, err := s.repo.GetPackage(ctx, packageID)

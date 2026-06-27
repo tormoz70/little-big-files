@@ -58,11 +58,11 @@ type CreateFileInput struct {
 }
 
 type SupplierStats struct {
-	SupplierID     int
-	TotalPackages  int64
-	TotalRefs      int64
-	DuplicateRefs  int64
-	LastActivity   time.Time
+	SupplierID    int
+	TotalPackages int64
+	TotalRefs     int64
+	DuplicateRefs int64
+	LastActivity  time.Time
 }
 
 func (s SupplierStats) DedupRatio() float64 {
@@ -82,6 +82,11 @@ type BlobByteTotals struct {
 type Tx interface {
 	GetBlob(ctx context.Context, hash []byte) (*ContentBlob, error)
 	InsertBlob(ctx context.Context, blob ContentBlob) error
+	// InsertBlobOrIncrement atomically inserts a new blob or, if a blob with the
+	// same content_hash already exists, increments its ref_count. It returns true
+	// when a new row was inserted (i.e. the content is genuinely new). This makes
+	// concurrent writes of identical new content safe (no unique-violation 500s).
+	InsertBlobOrIncrement(ctx context.Context, blob ContentBlob) (bool, error)
 	IncrementRefCount(ctx context.Context, hash []byte) error
 	IncrementRefCountIfExists(ctx context.Context, hash []byte) (bool, error)
 	IncrementRefCounts(ctx context.Context, hashes [][]byte) error
@@ -102,6 +107,7 @@ type Repository interface {
 	CountContentBlobs(ctx context.Context) (int64, error)
 	GetBlob(ctx context.Context, hash []byte) (*ContentBlob, error)
 	ListClonePackageIDs(ctx context.Context, canonicalID int64) ([]int64, error)
+	ListPendingLargePackages(ctx context.Context) ([]int64, error)
 	GetLatestDictionary(ctx context.Context) ([]byte, int, error)
 	SaveDictionary(ctx context.Context, dict []byte, entryCount int) error
 	ListContentBlobs(ctx context.Context) ([]ContentBlob, error)

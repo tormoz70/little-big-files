@@ -79,9 +79,29 @@ func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte,
 
 func (b *BlobStore) storeNew(ctx context.Context, tx metadata.Tx, hash, data []byte, recordType RecordType, supplierID int) ([]byte, bool, error) {
 	record := b.encodeRecord(data, recordType)
-	loc, err := b.segments.Append(record)
+	loc, err := b.segments.Append(ctx, record)
 	if err != nil {
 		return nil, false, err
+	}
+
+	blob := metadata.ContentBlob{
+		ContentHash: hash,
+		Size:        len(data),
+		StoredSize:  len(record),
+		SegmentID:   loc.SegmentID,
+		Offset:      loc.Offset,
+		RefCount:    1,
+		FirstSeenAt: time.Now().UTC(),
+	}
+	// Idempotent insert: if a concurrent transaction already stored identical
+	// content, this increments ref_count instead of failing on the PK. The bytes
+	// appended above become harmless orphans (append-only; reconciled on rebuild).
+	inserted, err := tx.InsertBlobOrIncrement(ctx, blob)
+	if err != nil {
+		return nil, false, fmt.Errorf("insert blob: %w", err)
+	}
+	if !inserted {
+		return hash, false, nil
 	}
 
 	magic, _, _ := DecodeRecordHeader(record)
@@ -103,18 +123,6 @@ func (b *BlobStore) storeNew(ctx context.Context, tx metadata.Tx, hash, data []b
 		})
 	}
 
-	blob := metadata.ContentBlob{
-		ContentHash: hash,
-		Size:        len(data),
-		StoredSize:  len(record),
-		SegmentID:   loc.SegmentID,
-		Offset:      loc.Offset,
-		RefCount:    1,
-		FirstSeenAt: time.Now().UTC(),
-	}
-	if err := tx.InsertBlob(ctx, blob); err != nil {
-		return nil, false, fmt.Errorf("insert blob: %w", err)
-	}
 	if err := b.indexPut(hash, blob); err != nil {
 		return nil, false, err
 	}

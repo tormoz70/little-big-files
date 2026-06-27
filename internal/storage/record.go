@@ -3,20 +3,43 @@ package storage
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 )
 
 const (
 	MagicXML  uint32 = 0x584D4C31 // "XML1"
 	MagicXMLC uint32 = 0x584D4C32 // "XML2" compressed XML
 	MagicZIP  uint32 = 0x5A495031 // "ZIP1"
-	MagicERR uint32 = 0x45525231 // "ERR1"
+	MagicERR  uint32 = 0x45525231 // "ERR1"
 
 	FooterMagic uint32 = 0x464F4F54 // "FOOT"
 
-	HeaderSize  = 8
-	FooterSize  = 32
-	RecordOverhead = HeaderSize + FooterSize
+	HeaderSize = 8
+	// ChecksumSize is the per-record CRC32C trailer appended after the payload.
+	// On-disk record layout: [magic:4][size:4][payload:size][crc32c:4].
+	ChecksumSize   = 4
+	FooterSize     = 32
+	RecordOverhead = HeaderSize + ChecksumSize
 )
+
+// crcTable is CRC32 Castagnoli (hardware-accelerated on most CPUs).
+var crcTable = crc32.MakeTable(crc32.Castagnoli)
+
+// RecordChecksum computes the integrity checksum stored in a record trailer.
+func RecordChecksum(payload []byte) uint32 {
+	return crc32.Checksum(payload, crcTable)
+}
+
+// KnownMagic reports whether magic is one of the recognised record magics.
+// Used during recovery to reject garbage/footer bytes when scanning a segment.
+func KnownMagic(magic uint32) bool {
+	switch magic {
+	case MagicXML, MagicXMLC, MagicZIP, MagicERR:
+		return true
+	default:
+		return false
+	}
+}
 
 type RecordType int
 
@@ -40,10 +63,11 @@ func (t RecordType) Magic() uint32 {
 func IsCompressedXML(magic uint32) bool { return magic == MagicXMLC }
 
 func EncodeRecord(magic uint32, payload []byte) []byte {
-	buf := make([]byte, HeaderSize+len(payload))
+	buf := make([]byte, HeaderSize+len(payload)+ChecksumSize)
 	binary.LittleEndian.PutUint32(buf[0:4], magic)
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(payload)))
 	copy(buf[HeaderSize:], payload)
+	binary.LittleEndian.PutUint32(buf[HeaderSize+len(payload):], RecordChecksum(payload))
 	return buf
 }
 

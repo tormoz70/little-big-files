@@ -12,12 +12,12 @@ import (
 
 // MemoryRepository is an in-memory metadata store for tests.
 type MemoryRepository struct {
-	mu      sync.Mutex
-	blobs   map[string]metadata.ContentBlob
-	pkgs    map[int64]metadata.Package
-	files   map[int64]metadata.PackageFile
-	stats   map[int]metadata.SupplierStats
-	nextPkg int64
+	mu       sync.Mutex
+	blobs    map[string]metadata.ContentBlob
+	pkgs     map[int64]metadata.Package
+	files    map[int64]metadata.PackageFile
+	stats    map[int]metadata.SupplierStats
+	nextPkg  int64
 	nextFile int64
 }
 
@@ -60,6 +60,17 @@ func (t *memTx) GetBlob(ctx context.Context, hash []byte) (*metadata.ContentBlob
 func (t *memTx) InsertBlob(ctx context.Context, blob metadata.ContentBlob) error {
 	t.repo.blobs[key(blob.ContentHash)] = blob
 	return nil
+}
+
+func (t *memTx) InsertBlobOrIncrement(ctx context.Context, blob metadata.ContentBlob) (bool, error) {
+	k := key(blob.ContentHash)
+	if existing, ok := t.repo.blobs[k]; ok {
+		existing.RefCount++
+		t.repo.blobs[k] = existing
+		return false, nil
+	}
+	t.repo.blobs[k] = blob
+	return true, nil
 }
 
 func (t *memTx) IncrementRefCount(ctx context.Context, hash []byte) error {
@@ -168,6 +179,19 @@ func (r *MemoryRepository) ListClonePackageIDs(ctx context.Context, canonicalID 
 	var ids []int64
 	for id, p := range r.pkgs {
 		if p.CanonicalPackageID != nil && *p.CanonicalPackageID == canonicalID {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
+func (r *MemoryRepository) ListPendingLargePackages(ctx context.Context) ([]int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []int64
+	for id, p := range r.pkgs {
+		if p.StorageMode == "raw_large" && p.CanonicalPackageID == nil {
 			ids = append(ids, id)
 		}
 	}

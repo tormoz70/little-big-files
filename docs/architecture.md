@@ -394,38 +394,40 @@ CLASS WriteBuffer:
 ├─────────────────────────────────────────────────────────────┤
 │  [RECORD 1]                                                 │
 │    [4 bytes: magic = 0x584D4C31 "XML1"]                    │
-│    [4 bytes: size = N]                                      │
-│    [N bytes: XML data]                                      │
-│    [16 bytes: XXH3-128 hash]  # для быстрой верификации     │
+│    [4 bytes: size = N (payload length)]                    │
+│    [N bytes: payload (XML/ZIP, optionally Zstd-compressed)] │
+│    [4 bytes: CRC32C(payload)]  # целостность записи         │
 │                                                             │
 │  [RECORD 2]                                                 │
 │    [4 bytes: magic]                                         │
 │    [4 bytes: size]                                          │
-│    [N bytes: XML data]                                      │
-│    [16 bytes: hash]                                         │
+│    [N bytes: payload]                                       │
+│    [4 bytes: CRC32C]                                        │
 │                                                             │
 │  ...                                                        │
 │                                                             │
 │  [RECORD K] (ZIP or XML)                                    │
-│    [4 bytes: magic = 0x5A495031 "ZIP1" or "XML1"]          │
+│    [4 bytes: magic = 0x5A495031 "ZIP1" / 0x584D4C32 "XML2"]│
 │    [4 bytes: size]                                          │
-│    [N bytes: data]                                          │
-│    [16 bytes: hash]                                         │
+│    [N bytes: payload]                                       │
+│    [4 bytes: CRC32C]                                        │
 │                                                             │
-│  [SEGMENT FOOTER]                                           │
+│  [SEGMENT FOOTER] (32 bytes, при seal сегмента)            │
 │    [4 bytes: record_count]                                  │
 │    [8 bytes: total_size]                                    │
-│    [16 bytes: segment_hash]                                 │
+│    [16 bytes: reserved]                                     │
 │    [4 bytes: footer_magic = 0x464F4F54 "FOOT"]             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **Обоснование формата:**
 
-- **Magic number:** защита от чтения "мусора" при сбое
+- **Magic number:** защита от чтения "мусора" при сбое; известный набор магиков (`XML1`/`XML2`/`ZIP1`/`ERR1`) используется при recovery для отсечения хвоста
 - **Size prefix:** позволяет читать запись без сканирования
-- **Hash в конце:** быстрая верификация без повторного чтения
+- **CRC32C(payload) в конце:** обнаружение тихой порчи/bit-rot; проверяется на чтении (флаг `VERIFY_CHECKSUM`, по умолчанию `true`) и при recovery-сканировании сегмента
 - **Footer:** для валидации сегмента и восстановления после сбоя
+
+> **Примечание о формате:** контрольная сумма записи — **CRC32C** (4 байта), не XXH3-128. Это формат текущей реализации (`internal/storage/record.go`). Сегменты, записанные более старой версией без CRC-трейлера, несовместимы и требуют пересборки индекса.
 
 ### 5.2. Формат записи в Hash Index (RocksDB)
 

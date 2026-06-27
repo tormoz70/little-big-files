@@ -100,6 +100,21 @@ func (t *pgTx) InsertBlob(ctx context.Context, blob ContentBlob) error {
 	return err
 }
 
+func (t *pgTx) InsertBlobOrIncrement(ctx context.Context, blob ContentBlob) (bool, error) {
+	var inserted bool
+	err := t.tx.QueryRow(ctx, `
+		INSERT INTO content_blobs (content_hash, size, stored_size, segment_id, "offset", ref_count, first_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (content_hash) DO UPDATE SET ref_count = content_blobs.ref_count + 1
+		RETURNING (xmax = 0)`,
+		blob.ContentHash, blob.Size, blob.StoredSize, blob.SegmentID, blob.Offset, blob.RefCount, blob.FirstSeenAt,
+	).Scan(&inserted)
+	if err != nil {
+		return false, err
+	}
+	return inserted, nil
+}
+
 func (t *pgTx) IncrementRefCount(ctx context.Context, hash []byte) error {
 	_, err := t.tx.Exec(ctx, `UPDATE content_blobs SET ref_count = ref_count + 1 WHERE content_hash = $1`, hash)
 	return err
@@ -221,6 +236,29 @@ func (r *PostgresRepository) ClonePackageRefs(ctx context.Context, canonicalID, 
 		}
 		return tx.IncrementRefCounts(ctx, hashes)
 	})
+}
+
+// ListPendingLargePackages returns packages still stored as raw_large, i.e.
+// awaiting (or never completed) async unpack. Used to recover the unpack queue
+// after a restart or a dropped job.
+func (r *PostgresRepository) ListPendingLargePackages(ctx context.Context) ([]int64, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id FROM packages
+		WHERE storage_mode = 'raw_large' AND canonical_package_id IS NULL
+		ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *PostgresRepository) GetPackage(ctx context.Context, id int64) (*Package, error) {
@@ -379,7 +417,6 @@ func (r *PostgresRepository) ListContentBlobs(ctx context.Context) ([]ContentBlo
 	}
 	return out, rows.Err()
 }
-
 
 func (r *PostgresRepository) UpsertContentBlob(ctx context.Context, blob ContentBlob) error {
 	stored := blob.StoredSize

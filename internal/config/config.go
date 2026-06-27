@@ -7,36 +7,38 @@ import (
 )
 
 type Config struct {
-	DataDir            string
-	PGDSN              string
-	SegmentMaxSize     int64
-	ZipThresholdSize   int
-	ZipThresholdCount  int
-	MaxBodyBytes       int64
-	HTTPAddr           string
-	MigrationsPath     string
-	LargeZipAsyncUnpack bool
-	UnpackWorkers       int
-	UnpackQueueSize     int
-	WriteBufferMaxBytes int
-	WriteBufferInterval time.Duration
-	CompressionEnabled  bool
-	CompressionMinSize  int
-	ExamplesDir         string
-	DedupBackend        string
-	RocksDBPath         string
-	BloomExpectedItems  uint
-	BloomFalsePositive  float64
-	DedupRebuildOnStart bool
+	DataDir               string
+	PGDSN                 string
+	SegmentMaxSize        int64
+	ZipThresholdSize      int
+	ZipThresholdCount     int
+	MaxBodyBytes          int64
+	HTTPAddr              string
+	MigrationsPath        string
+	LargeZipAsyncUnpack   bool
+	UnpackWorkers         int
+	UnpackQueueSize       int
+	UnpackRecoverInterval time.Duration
+	WriteBufferMaxBytes   int
+	WriteBufferInterval   time.Duration
+	VerifyChecksum        bool
+	CompressionEnabled    bool
+	CompressionMinSize    int
+	ExamplesDir           string
+	DedupBackend          string
+	RocksDBPath           string
+	BloomExpectedItems    uint
+	BloomFalsePositive    float64
+	DedupRebuildOnStart   bool
 	// Shard (F4)
-	ShardID             int
-	ShardRole           string // primary | replica
-	ShardReadOnly       bool
-	ShardUUID           string
-	ShardClusterKey     string
-	ShardAdvertiseURL   string
-	ShardStartupState   string
-	CoordinatorURL      string
+	ShardID           int
+	ShardRole         string // primary | replica
+	ShardReadOnly     bool
+	ShardUUID         string
+	ShardClusterKey   string
+	ShardAdvertiseURL string
+	ShardStartupState string
+	CoordinatorURL    string
 	// Coordinator (F4)
 	CoordinatorPGDSN     string
 	ShardMaxBytes        int64
@@ -47,40 +49,42 @@ type Config struct {
 
 func Load() Config {
 	return Config{
-		DataDir:           env("DATA_DIR", "./data/segments"),
-		PGDSN:             env("PG_DSN", "postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable"),
-		SegmentMaxSize:    envInt64("SEGMENT_MAX_SIZE", 4*1024*1024*1024),
-		ZipThresholdSize:  envInt("ZIP_THRESHOLD_SIZE", 102400),
-		ZipThresholdCount: envInt("ZIP_THRESHOLD_COUNT", 100),
-		MaxBodyBytes:      envInt64("MAX_BODY_BYTES", 64*1024*1024),
-		HTTPAddr:            env("HTTP_ADDR", ":8080"),
-		MigrationsPath:      env("MIGRATIONS_PATH", "./migrations"),
-		LargeZipAsyncUnpack: envBool("LARGE_ZIP_ASYNC_UNPACK", true),
-		UnpackWorkers:       envInt("UNPACK_WORKERS", 2),
-		UnpackQueueSize:     envInt("UNPACK_QUEUE_SIZE", 256),
-		WriteBufferMaxBytes: envInt("WRITE_BUFFER_MAX_BYTES", 4*1024*1024),
-		WriteBufferInterval: envDuration("WRITE_BUFFER_INTERVAL", 100*time.Millisecond),
-		CompressionEnabled:  envBool("COMPRESSION_ENABLED", true),
-		CompressionMinSize:  envInt("COMPRESSION_MIN_SIZE", 64),
-		ExamplesDir:         env("EXAMPLES_DIR", "./examples"),
-		DedupBackend:        env("DEDUP_BACKEND", "memory"),
-		RocksDBPath:         env("ROCKSDB_PATH", "./data/rocksdb"),
-		BloomExpectedItems:  uint(envInt("BLOOM_EXPECTED_ITEMS", 1_000_000)),
-		BloomFalsePositive:  envFloat("BLOOM_FALSE_POSITIVE", 0.001),
-		DedupRebuildOnStart: envBool("DEDUP_REBUILD_ON_START", true),
-		ShardID:             envInt("SHARD_ID", 0),
-		ShardRole:           env("SHARD_ROLE", "primary"),
-		ShardReadOnly:       envBool("SHARD_READ_ONLY", false),
-		ShardUUID:           env("SHARD_UUID", ""),
-		ShardClusterKey:     env("SHARD_CLUSTER_KEY", ""),
-		ShardAdvertiseURL:   env("SHARD_ADVERTISE_URL", ""),
-		ShardStartupState:   env("SHARD_STARTUP_STATE", "standby"),
-		CoordinatorURL:      env("COORDINATOR_URL", ""),
-		CoordinatorPGDSN:    env("COORDINATOR_PG_DSN", "postgres://lbf:lbf@localhost:5433/coordinator?sslmode=disable"),
-		ShardMaxBytes:       envInt64("SHARD_MAX_BYTES", 500*1024*1024*1024),
-		SealCheckInterval:   envDuration("SEAL_CHECK_INTERVAL", 30*time.Second),
-		CoordinatorBootstrap: env("COORDINATOR_BOOTSTRAP", "./deploy/shards.bootstrap.json"),
-		ClusterKey:           env("CLUSTER_KEY", ""),
+		DataDir:               env("DATA_DIR", "./data/segments"),
+		PGDSN:                 env("PG_DSN", "postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable"),
+		SegmentMaxSize:        envInt64("SEGMENT_MAX_SIZE", 4*1024*1024*1024),
+		ZipThresholdSize:      envInt("ZIP_THRESHOLD_SIZE", 102400),
+		ZipThresholdCount:     envInt("ZIP_THRESHOLD_COUNT", 100),
+		MaxBodyBytes:          envInt64("MAX_BODY_BYTES", 64*1024*1024),
+		HTTPAddr:              env("HTTP_ADDR", ":8080"),
+		MigrationsPath:        env("MIGRATIONS_PATH", "./migrations"),
+		LargeZipAsyncUnpack:   envBool("LARGE_ZIP_ASYNC_UNPACK", true),
+		UnpackWorkers:         envInt("UNPACK_WORKERS", 2),
+		UnpackQueueSize:       envInt("UNPACK_QUEUE_SIZE", 256),
+		UnpackRecoverInterval: envDuration("UNPACK_RECOVER_INTERVAL", time.Minute),
+		WriteBufferMaxBytes:   envInt("WRITE_BUFFER_MAX_BYTES", 4*1024*1024),
+		WriteBufferInterval:   envDuration("WRITE_BUFFER_INTERVAL", 100*time.Millisecond),
+		VerifyChecksum:        envBool("VERIFY_CHECKSUM", true),
+		CompressionEnabled:    envBool("COMPRESSION_ENABLED", true),
+		CompressionMinSize:    envInt("COMPRESSION_MIN_SIZE", 64),
+		ExamplesDir:           env("EXAMPLES_DIR", "./examples"),
+		DedupBackend:          env("DEDUP_BACKEND", "memory"),
+		RocksDBPath:           env("ROCKSDB_PATH", "./data/rocksdb"),
+		BloomExpectedItems:    uint(envInt("BLOOM_EXPECTED_ITEMS", 1_000_000)),
+		BloomFalsePositive:    envFloat("BLOOM_FALSE_POSITIVE", 0.001),
+		DedupRebuildOnStart:   envBool("DEDUP_REBUILD_ON_START", true),
+		ShardID:               envInt("SHARD_ID", 0),
+		ShardRole:             env("SHARD_ROLE", "primary"),
+		ShardReadOnly:         envBool("SHARD_READ_ONLY", false),
+		ShardUUID:             env("SHARD_UUID", ""),
+		ShardClusterKey:       env("SHARD_CLUSTER_KEY", ""),
+		ShardAdvertiseURL:     env("SHARD_ADVERTISE_URL", ""),
+		ShardStartupState:     env("SHARD_STARTUP_STATE", "standby"),
+		CoordinatorURL:        env("COORDINATOR_URL", ""),
+		CoordinatorPGDSN:      env("COORDINATOR_PG_DSN", "postgres://lbf:lbf@localhost:5433/coordinator?sslmode=disable"),
+		ShardMaxBytes:         envInt64("SHARD_MAX_BYTES", 500*1024*1024*1024),
+		SealCheckInterval:     envDuration("SEAL_CHECK_INTERVAL", 30*time.Second),
+		CoordinatorBootstrap:  env("COORDINATOR_BOOTSTRAP", "./deploy/shards.bootstrap.json"),
+		ClusterKey:            env("CLUSTER_KEY", ""),
 	}
 }
 

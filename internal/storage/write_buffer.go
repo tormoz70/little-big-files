@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -8,6 +9,7 @@ import (
 type pendingWrite struct {
 	record []byte
 	loc    Location
+	err    error
 	done   chan error
 }
 
@@ -21,6 +23,10 @@ type WriteBuffer struct {
 	bufSize int
 
 	sm *SegmentManager
+
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 func NewWriteBuffer(sm *SegmentManager, maxSize int, maxInterval time.Duration) *WriteBuffer {
@@ -28,12 +34,18 @@ func NewWriteBuffer(sm *SegmentManager, maxSize int, maxInterval time.Duration) 
 		maxSize:     maxSize,
 		maxInterval: maxInterval,
 		sm:          sm,
+		stop:        make(chan struct{}),
 	}
+	wb.wg.Add(1)
 	go wb.flushLoop()
 	return wb
 }
 
-func (wb *WriteBuffer) Append(record []byte) (Location, error) {
+// Append enqueues a record and blocks until it is durably written (or the batch
+// fails). It honours ctx cancellation: if the caller's context is cancelled
+// before the flush completes, it returns ctx.Err(). The record may still be
+// written by a later flush (a harmless orphan in the append-only segment).
+func (wb *WriteBuffer) Append(ctx context.Context, record []byte) (Location, error) {
 	pw := &pendingWrite{
 		record: record,
 		done:   make(chan error, 1),
@@ -49,17 +61,28 @@ func (wb *WriteBuffer) Append(record []byte) (Location, error) {
 		wb.Flush()
 	}
 
-	if err := <-pw.done; err != nil {
-		return Location{}, err
+	select {
+	case err := <-pw.done:
+		if err != nil {
+			return Location{}, err
+		}
+		return pw.loc, nil
+	case <-ctx.Done():
+		return Location{}, ctx.Err()
 	}
-	return pw.loc, nil
 }
 
 func (wb *WriteBuffer) flushLoop() {
+	defer wb.wg.Done()
 	ticker := time.NewTicker(wb.maxInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		wb.Flush()
+	for {
+		select {
+		case <-wb.stop:
+			return
+		case <-ticker.C:
+			wb.Flush()
+		}
 	}
 }
 
@@ -74,17 +97,16 @@ func (wb *WriteBuffer) Flush() {
 	wb.bufSize = 0
 	wb.mu.Unlock()
 
-	locs, err := wb.sm.batchAppend(batch)
-	for i, pw := range batch {
-		if err != nil {
-			pw.done <- err
-		} else {
-			pw.loc = locs[i]
-			pw.done <- nil
-		}
+	// batchAppend records per-write success/failure on each pendingWrite, so a
+	// single bad record no longer fails unrelated writes sharing the batch.
+	wb.sm.batchAppend(batch)
+	for _, pw := range batch {
+		pw.done <- pw.err
 	}
 }
 
 func (wb *WriteBuffer) Close() {
+	wb.stopOnce.Do(func() { close(wb.stop) })
+	wb.wg.Wait()
 	wb.Flush()
 }

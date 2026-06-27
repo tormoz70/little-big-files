@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,10 +13,10 @@ import (
 
 // ShardGuard holds mutable shard role/read-only state for F4.
 type ShardGuard struct {
-	ShardID   int
-	Role      string
-	readOnly  bool
-	segments  *storage.SegmentManager
+	ShardID  int
+	Role     string
+	readOnly bool
+	segments *storage.SegmentManager
 }
 
 func NewShardGuard(shardID int, role string, readOnly bool, segments *storage.SegmentManager) *ShardGuard {
@@ -63,11 +64,50 @@ type segmentFileInfo struct {
 	Size int64  `json:"size"`
 }
 
+// internalAuthKey returns the shared secret used to protect /v1/internal/*.
+// Prefers CLUSTER_KEY, falling back to SHARD_CLUSTER_KEY (the value a shard
+// already holds in sharded deployments).
+func (s *Server) internalAuthKey() string {
+	if k := strings.TrimSpace(s.cfg.ClusterKey); k != "" {
+		return k
+	}
+	return strings.TrimSpace(s.cfg.ShardClusterKey)
+}
+
+func internalKeyFromRequest(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Cluster-Key")); v != "" {
+		return v
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[len("bearer "):])
+	}
+	return ""
+}
+
+// requireClusterKey wraps internal handlers with constant-time cluster-key auth.
+// Fails closed: if no key is configured the endpoints are disabled entirely.
+func (s *Server) requireClusterKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		expected := s.internalAuthKey()
+		if expected == "" {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "internal endpoints disabled: cluster key not configured"})
+			return
+		}
+		provided := internalKeyFromRequest(r)
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid or missing cluster key"})
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) mountInternal(r chi.Router, guard *ShardGuard) {
 	if guard == nil {
 		return
 	}
-	r.Get("/v1/internal/stats", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/v1/internal/stats", s.requireClusterKey(func(w http.ResponseWriter, r *http.Request) {
 		total, err := guard.segments.TotalBytes()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
@@ -79,18 +119,18 @@ func (s *Server) mountInternal(r chi.Router, guard *ShardGuard) {
 			ReadOnly:   guard.ReadOnly(),
 			TotalBytes: total,
 		})
-	})
+	}))
 
-	r.Post("/v1/internal/seal", func(w http.ResponseWriter, r *http.Request) {
+	r.Post("/v1/internal/seal", s.requireClusterKey(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.EqualFold(guard.Role, "primary") {
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "only primary can seal"})
 			return
 		}
 		guard.SetReadOnly(true)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sealed"})
-	})
+	}))
 
-	r.Get("/v1/internal/segments", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/v1/internal/segments", s.requireClusterKey(func(w http.ResponseWriter, r *http.Request) {
 		dir := guard.segments.SegmentDir()
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -109,9 +149,9 @@ func (s *Server) mountInternal(r chi.Router, guard *ShardGuard) {
 			files = append(files, segmentFileInfo{Name: e.Name(), Size: info.Size()})
 		}
 		writeJSON(w, http.StatusOK, files)
-	})
+	}))
 
-	r.Get("/v1/internal/segments/{name}", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/v1/internal/segments/{name}", s.requireClusterKey(func(w http.ResponseWriter, r *http.Request) {
 		name := filepath.Base(chi.URLParam(r, "name"))
 		path := filepath.Join(guard.segments.SegmentDir(), name)
 		data, err := os.ReadFile(path)
@@ -122,5 +162,5 @@ func (s *Server) mountInternal(r chi.Router, guard *ShardGuard) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
-	})
+	}))
 }

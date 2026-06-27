@@ -45,6 +45,19 @@ func (tx *memTx) InsertBlob(ctx context.Context, blob metadata.ContentBlob) erro
 	return nil
 }
 
+func (tx *memTx) InsertBlobOrIncrement(ctx context.Context, blob metadata.ContentBlob) (bool, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	k := blobKey(blob.ContentHash)
+	if existing, ok := tx.blobs[k]; ok {
+		existing.RefCount++
+		tx.blobs[k] = existing
+		return false, nil
+	}
+	tx.blobs[k] = blob
+	return true, nil
+}
+
 func (tx *memTx) IncrementRefCount(ctx context.Context, hash []byte) error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
@@ -148,7 +161,7 @@ func TestWriteBufferBatchesFlush(t *testing.T) {
 	defer wb.Close()
 
 	record := storage.EncodeRecord(storage.MagicXML, []byte("payload-one"))
-	loc, err := sm.Append(record)
+	loc, err := sm.Append(context.Background(), record)
 	require.NoError(t, err)
 
 	data, err := sm.Read(loc)
@@ -168,7 +181,7 @@ func TestWriteBufferBatchBySize(t *testing.T) {
 
 	record := storage.EncodeRecord(storage.MagicXML, []byte("0123456789012345678901234567890123456789012345678901234567890"))
 	for i := 0; i < 3; i++ {
-		_, err := sm.Append(record)
+		_, err := sm.Append(context.Background(), record)
 		require.NoError(t, err)
 	}
 }
