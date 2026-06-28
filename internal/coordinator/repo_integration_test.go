@@ -51,7 +51,7 @@ func TestPatchShardStatePromotesStandbyAndSealsPreviousActive(t *testing.T) {
 	statsSrv := newStatsServer(t)
 	defer statsSrv.Close()
 
-	reg := coordinator.NewRegistry(repo, 0)
+	reg := coordinator.NewRegistry(repo, 0, "")
 	a, _, err := repo.RegisterShard(ctx, "44444444-4444-4444-4444-444444444444", coordinator.ShardStandby, statsSrv.URL, nil)
 	require.NoError(t, err)
 	_, err = reg.PatchShardState(ctx, a.ShardID, coordinator.ShardActive, true)
@@ -82,7 +82,7 @@ func TestProxyPostReturns503WhenActiveShardUnavailable(t *testing.T) {
 	statsSrv := newStatsServer(t)
 	defer statsSrv.Close()
 
-	reg := coordinator.NewRegistry(repo, 0)
+	reg := coordinator.NewRegistry(repo, 0, "")
 	shard, _, err := repo.RegisterShard(ctx, "66666666-6666-6666-6666-666666666666", coordinator.ShardStandby, statsSrv.URL, nil)
 	require.NoError(t, err)
 

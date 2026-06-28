@@ -39,7 +39,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	reg := coordinator.NewRegistry(repo, cfg.ShardMaxBytes)
+	reg := coordinator.NewRegistry(repo, cfg.ShardMaxBytes, cfg.ClusterKey)
 	srv := coordinator.NewServer(cfg, reg)
 	srv.RunSealLoop(ctx)
 	metrics.RunCoordinatorRefresh(ctx, reg, cfg.ShardMaxBytes, 10*time.Second)

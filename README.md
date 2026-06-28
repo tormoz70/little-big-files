@@ -117,6 +117,7 @@ PG_DSN=postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable make test-integrati
 
 - [test-stand.md](docs/test-stand.md) — **тестовый стенд Ф4** (развёртывание, сценарии)
 - [pilot-stand.md](docs/pilot-stand.md) — **опытная эксплуатация на ВМ** (параметры и инструкция)
+- [implementation.md](docs/implementation.md) — **документация по реализации** (архитектура, sequence diagrams, storage, fault tolerance, security)
 - [architecture.md](docs/architecture.md)
 - [stack.md](docs/stack.md)
 - [sharding-model.md](docs/sharding-model.md)

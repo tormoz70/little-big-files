@@ -23,7 +23,7 @@ func TestRegistryReadURLPrefersReplicaForSealed(t *testing.T) {
 		PrimaryURL: "http://primary:8080",
 		ReplicaURL: &replica,
 	}
-	reg := coordinator.NewRegistry(nil, 0)
+	reg := coordinator.NewRegistry(nil, 0, "")
 	require.Equal(t, replica, reg.ReadURL(&shard))
 	require.Equal(t, "http://primary:8080", reg.ReadURL(&coordinator.ShardInfo{
 		ShardID: 1, State: coordinator.ShardActive, PrimaryURL: "http://primary:8080",
@@ -31,7 +31,7 @@ func TestRegistryReadURLPrefersReplicaForSealed(t *testing.T) {
 }
 
 func TestRegistryReadURLFallsBackToPrimaryWhenNoReplica(t *testing.T) {
-	reg := coordinator.NewRegistry(nil, 0)
+	reg := coordinator.NewRegistry(nil, 0, "")
 	primary := "http://primary:8080"
 	shard := coordinator.ShardInfo{
 		ShardID:    0,
