@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 type Location struct {
@@ -28,6 +29,12 @@ type SegmentManager struct {
 
 	readMu    sync.Mutex
 	readFiles map[int]*os.File
+	readMeta  map[int]readHandleMeta
+}
+
+type readHandleMeta struct {
+	size    int64
+	modTime time.Time
 }
 
 func NewSegmentManager(dir string, maxSegmentSize int64) (*SegmentManager, error) {
@@ -39,6 +46,7 @@ func NewSegmentManager(dir string, maxSegmentSize int64) (*SegmentManager, error
 		maxSegmentSize: maxSegmentSize,
 		verifyChecksum: true,
 		readFiles:      make(map[int]*os.File),
+		readMeta:       make(map[int]readHandleMeta),
 	}
 	if err := sm.recover(); err != nil {
 		return nil, err
@@ -263,14 +271,36 @@ func (sm *SegmentManager) finalizeLocked() error {
 func (sm *SegmentManager) openReadHandle(segmentID int) (*os.File, error) {
 	sm.readMu.Lock()
 	defer sm.readMu.Unlock()
-	if f, ok := sm.readFiles[segmentID]; ok {
-		return f, nil
+
+	path := sm.segmentPath(segmentID)
+	info, err := os.Stat(path)
+	if err != nil {
+		if old, ok := sm.readFiles[segmentID]; ok {
+			_ = old.Close()
+			delete(sm.readFiles, segmentID)
+			delete(sm.readMeta, segmentID)
+		}
+		return nil, err
 	}
-	f, err := os.Open(sm.segmentPath(segmentID))
+
+	if f, ok := sm.readFiles[segmentID]; ok {
+		meta := sm.readMeta[segmentID]
+		if meta.size == info.Size() && meta.modTime.Equal(info.ModTime()) {
+			return f, nil
+		}
+		_ = f.Close()
+		delete(sm.readFiles, segmentID)
+		delete(sm.readMeta, segmentID)
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	sm.readFiles[segmentID] = f
+	sm.readMeta[segmentID] = readHandleMeta{
+		size:    info.Size(),
+		modTime: info.ModTime(),
+	}
 	return f, nil
 }
 

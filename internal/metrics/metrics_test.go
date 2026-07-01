@@ -84,3 +84,30 @@ func TestCoordinatorBarBytesShowsLastFourShards(t *testing.T) {
 	require.Contains(t, body, `lbf_coordinator_shard_bar_bytes{shard_id="2",state="active"} 30`)
 	require.Contains(t, body, `lbf_coordinator_shard_bar_bytes{shard_id="5",state="standby"} 60`)
 }
+
+func TestCoordinatorActiveShardGaugeResetsWhenNoActive(t *testing.T) {
+	metrics.SetCoordinatorShards([]metrics.ShardSnapshot{
+		{ShardID: 3, State: "standby", TotalBytes: 10},
+	}, 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	metrics.CoordinatorHandler().ServeHTTP(rec, req)
+	require.Contains(t, rec.Body.String(), "lbf_coordinator_active_shard_id -1")
+}
+
+func TestCoordinatorShardUpDropsOldStateLabel(t *testing.T) {
+	metrics.SetCoordinatorShardUp("9", "standby", true)
+	metrics.SetCoordinatorShardUp("9", "active", true)
+	metrics.SetCoordinatorShards([]metrics.ShardSnapshot{
+		{ShardID: 9, State: "active", TotalBytes: 1},
+	}, 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	metrics.CoordinatorHandler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	require.Contains(t, body, `lbf_coordinator_shard_up{shard_id="9",state="active"} 1`)
+	require.NotContains(t, body, `lbf_coordinator_shard_up{shard_id="9",state="standby"}`)
+}

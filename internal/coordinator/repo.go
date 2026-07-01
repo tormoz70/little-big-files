@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,16 +48,21 @@ func RunMigrations(ctx context.Context, dsn, dir string) error {
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
-		sql, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sql, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			return err
 		}
 		if _, err := pool.Exec(ctx, string(sql)); err != nil {
-			return fmt.Errorf("migration %s: %w", e.Name(), err)
+			return fmt.Errorf("migration %s: %w", name, err)
 		}
 	}
 	return nil
@@ -197,6 +203,78 @@ func (r *Repository) SetShardState(ctx context.Context, shardID int, state Shard
 		UPDATE shard_registry SET state = $2, total_bytes = $3, sealed_at = $4 WHERE shard_id = $1`,
 		shardID, string(state), totalBytes, sealedAt)
 	return err
+}
+
+type SealedShardTransition struct {
+	ShardID    int
+	TotalBytes int64
+	SealedAt   time.Time
+}
+
+func (r *Repository) PromoteStandby(ctx context.Context, targetShardID int, sealedActive *SealedShardTransition) (*ShardInfo, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	target, err := scanShard(tx.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry
+		WHERE shard_id = $1
+		FOR UPDATE`, targetShardID))
+	if err != nil {
+		return nil, err
+	}
+	if target == nil {
+		return nil, ErrShardNotFound
+	}
+	if target.State != ShardStandby {
+		return nil, ErrStateConflict
+	}
+
+	currentActive, err := scanShard(tx.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry
+		WHERE state = 'active' AND shard_id <> $1
+		ORDER BY shard_id
+		LIMIT 1
+		FOR UPDATE`, targetShardID))
+	if err != nil {
+		return nil, err
+	}
+
+	if sealedActive != nil {
+		if currentActive == nil || currentActive.ShardID != sealedActive.ShardID {
+			return nil, ErrStateConflict
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE shard_registry
+			SET state = 'sealed', total_bytes = $2, sealed_at = $3, last_error = NULL
+			WHERE shard_id = $1`, sealedActive.ShardID, sealedActive.TotalBytes, sealedActive.SealedAt); err != nil {
+			return nil, err
+		}
+	} else if currentActive != nil {
+		return nil, ErrStateConflict
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE shard_registry
+		SET state = 'active', sealed_at = NULL, last_error = NULL
+		WHERE shard_id = $1`, targetShardID); err != nil {
+		return nil, err
+	}
+
+	updated, err := scanShard(tx.QueryRow(ctx, `
+		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
+		FROM shard_registry WHERE shard_id = $1`, targetShardID))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 func (r *Repository) GetShardByUUID(ctx context.Context, shardUUID string) (*ShardInfo, error) {
@@ -409,6 +487,11 @@ func (r *Repository) FindShardByXMLHash(ctx context.Context, hash []byte) (*Shar
 	return r.GetShard(ctx, shardID)
 }
 
+func (r *Repository) TruncateAll(ctx context.Context) error {
+	_, err := r.pool.Exec(ctx, `TRUNCATE global_xml_index, global_package_index, shard_registry RESTART IDENTITY CASCADE`)
+	return err
+}
+
 // BootstrapFromFile loads shard registry entries from JSON.
 func (r *Repository) BootstrapFromFile(ctx context.Context, path string) error {
 	data, err := os.ReadFile(path)
@@ -431,7 +514,7 @@ func (r *Repository) BootstrapFromFile(ctx context.Context, path string) error {
 		if b.ReplicaURL != "" {
 			replica = &b.ReplicaURL
 		}
-		if err := r.UpsertShard(ctx, ShardInfo{
+		if err := r.seedShardFromBootstrap(ctx, ShardInfo{
 			ShardID:    b.ShardID,
 			ShardUUID:  shardUUID,
 			State:      ShardState(b.State),
@@ -442,4 +525,26 @@ func (r *Repository) BootstrapFromFile(ctx context.Context, path string) error {
 		}
 	}
 	return nil
+}
+
+func (r *Repository) seedShardFromBootstrap(ctx context.Context, s ShardInfo) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO shard_registry (
+			shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error
+		)
+		VALUES ($1, $2, $3, $4, $5, 0, NULL, NULL, NULL)
+		ON CONFLICT (shard_id) DO UPDATE SET
+			shard_uuid = COALESCE(shard_registry.shard_uuid, EXCLUDED.shard_uuid),
+			primary_url = CASE
+				WHEN NULLIF(BTRIM(shard_registry.primary_url), '') IS NULL THEN EXCLUDED.primary_url
+				ELSE shard_registry.primary_url
+			END,
+			replica_url = COALESCE(shard_registry.replica_url, EXCLUDED.replica_url)`,
+		s.ShardID,
+		s.ShardUUID,
+		string(s.State),
+		s.PrimaryURL,
+		s.ReplicaURL,
+	)
+	return err
 }

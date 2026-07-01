@@ -1,10 +1,14 @@
 package api
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -60,8 +64,10 @@ type shardStatsResponse struct {
 }
 
 type segmentFileInfo struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	Name         string `json:"name"`
+	Size         int64  `json:"size"`
+	SHA256       string `json:"sha256"`
+	ModifiedUnix int64  `json:"modified_unix"`
 }
 
 // internalAuthKey returns the shared secret used to protect /v1/internal/*.
@@ -142,17 +148,35 @@ func (s *Server) mountInternal(r chi.Router, guard *ShardGuard) {
 			if e.IsDir() {
 				continue
 			}
+			if !allowedInternalSyncFile(e.Name()) {
+				continue
+			}
 			info, err := e.Info()
 			if err != nil {
 				continue
 			}
-			files = append(files, segmentFileInfo{Name: e.Name(), Size: info.Size()})
+			path := filepath.Join(dir, e.Name())
+			sum, err := fileSHA256(path)
+			if err != nil {
+				continue
+			}
+			files = append(files, segmentFileInfo{
+				Name:         e.Name(),
+				Size:         info.Size(),
+				SHA256:       sum,
+				ModifiedUnix: info.ModTime().Unix(),
+			})
 		}
+		sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 		writeJSON(w, http.StatusOK, files)
 	}))
 
 	r.Get("/v1/internal/segments/{name}", s.requireClusterKey(func(w http.ResponseWriter, r *http.Request) {
-		name := filepath.Base(chi.URLParam(r, "name"))
+		name := chi.URLParam(r, "name")
+		if filepath.Base(name) != name || !allowedInternalSyncFile(name) {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "segment not found"})
+			return
+		}
 		path := filepath.Join(guard.segments.SegmentDir(), name)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -163,4 +187,24 @@ func (s *Server) mountInternal(r chi.Router, guard *ShardGuard) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	}))
+}
+
+func allowedInternalSyncFile(name string) bool {
+	if strings.HasPrefix(name, "segment_") && (strings.HasSuffix(name, ".dat") || strings.HasSuffix(name, ".idx")) {
+		return true
+	}
+	return name == "ingest_journal.ndjson"
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

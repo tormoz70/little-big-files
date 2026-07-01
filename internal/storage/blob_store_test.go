@@ -94,11 +94,14 @@ func (tx *memTx) CreatePackage(ctx context.Context, in metadata.CreatePackageInp
 func (tx *memTx) CreatePackageFile(ctx context.Context, packageID int64, in metadata.CreateFileInput) (int64, error) {
 	return 0, nil
 }
+func (tx *memTx) GetPackageForUpdate(ctx context.Context, packageID int64) (*metadata.Package, error) {
+	return nil, nil
+}
 func (tx *memTx) GetBlobByHash(ctx context.Context, hash []byte) (*metadata.ContentBlob, error) {
 	return tx.GetBlob(ctx, hash)
 }
-func (tx *memTx) UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) error {
-	return nil
+func (tx *memTx) UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) (bool, error) {
+	return true, nil
 }
 
 func trainingSamples(n int) [][]byte {

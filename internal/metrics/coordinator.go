@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -63,6 +64,9 @@ var (
 		},
 		[]string{"shard_id", "op"},
 	)
+
+	coordinatorShardUpMu      sync.Mutex
+	coordinatorShardUpByShard = map[string]string{}
 )
 
 func init() {
@@ -107,8 +111,10 @@ func SetCoordinatorShards(shards []ShardSnapshot, maxBytes int64) {
 	CoordinatorShardBarBytes.Reset()
 
 	activeID := -1.0
+	seen := make(map[string]struct{}, len(shards))
 	for _, s := range shards {
 		id := strconv.Itoa(s.ShardID)
+		seen[id] = struct{}{}
 		CoordinatorShardInfo.WithLabelValues(id, s.State).Set(1)
 		CoordinatorShardBytes.WithLabelValues(id, s.State).Set(float64(s.TotalBytes))
 		if s.State == "active" {
@@ -119,13 +125,19 @@ func SetCoordinatorShards(shards []ShardSnapshot, maxBytes int64) {
 		id := strconv.Itoa(s.ShardID)
 		CoordinatorShardBarBytes.WithLabelValues(id, s.State).Set(float64(s.TotalBytes))
 	}
-	if activeID >= 0 {
-		CoordinatorActiveShard.Set(activeID)
-	}
+	CoordinatorActiveShard.Set(activeID)
+	pruneCoordinatorShardUp(seen)
 	CoordinatorShardMaxBytes.Set(float64(maxBytes))
 }
 
 func SetCoordinatorShardUp(shardID, state string, up bool) {
+	coordinatorShardUpMu.Lock()
+	if prevState, ok := coordinatorShardUpByShard[shardID]; ok && prevState != state {
+		CoordinatorShardUp.DeleteLabelValues(shardID, prevState)
+	}
+	coordinatorShardUpByShard[shardID] = state
+	coordinatorShardUpMu.Unlock()
+
 	value := 0.0
 	if up {
 		value = 1
@@ -135,6 +147,18 @@ func SetCoordinatorShardUp(shardID, state string, up bool) {
 
 func IncCoordinatorShardFailures(shardID, op string) {
 	CoordinatorShardFailures.WithLabelValues(shardID, op).Inc()
+}
+
+func pruneCoordinatorShardUp(seen map[string]struct{}) {
+	coordinatorShardUpMu.Lock()
+	defer coordinatorShardUpMu.Unlock()
+	for shardID, state := range coordinatorShardUpByShard {
+		if _, ok := seen[shardID]; ok {
+			continue
+		}
+		CoordinatorShardUp.DeleteLabelValues(shardID, state)
+		delete(coordinatorShardUpByShard, shardID)
+	}
 }
 
 func recentShardWindow(shards []ShardSnapshot, limit int) []ShardSnapshot {

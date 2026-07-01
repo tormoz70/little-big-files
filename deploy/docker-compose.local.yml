@@ -121,6 +121,7 @@ services:
       target: shard-sync
     environment:
       SYNC_PRIMARY_URL: http://shard-0-primary:8080
+      CLUSTER_KEY: lbf-local-cluster-key
       DATA_DIR: /data/segments
       SYNC_INTERVAL: 5s
     volumes:
@@ -199,6 +200,7 @@ services:
       target: shard-sync
     environment:
       SYNC_PRIMARY_URL: http://shard-1-primary:8080
+      CLUSTER_KEY: lbf-local-cluster-key
       DATA_DIR: /data/segments
       SYNC_INTERVAL: 5s
     volumes:
@@ -277,6 +279,7 @@ services:
       target: shard-sync
     environment:
       SYNC_PRIMARY_URL: http://shard-2-primary:8080
+      CLUSTER_KEY: lbf-local-cluster-key
       DATA_DIR: /data/segments
       SYNC_INTERVAL: 5s
     volumes:

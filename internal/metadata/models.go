@@ -92,8 +92,9 @@ type Tx interface {
 	IncrementRefCounts(ctx context.Context, hashes [][]byte) error
 	CreatePackage(ctx context.Context, in CreatePackageInput) (int64, error)
 	CreatePackageFile(ctx context.Context, packageID int64, in CreateFileInput) (int64, error)
+	GetPackageForUpdate(ctx context.Context, packageID int64) (*Package, error)
 	GetBlobByHash(ctx context.Context, hash []byte) (*ContentBlob, error)
-	UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) error
+	UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) (bool, error)
 }
 
 type Repository interface {

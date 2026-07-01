@@ -70,7 +70,9 @@ func (b *BlobStore) StoreOrRef(ctx context.Context, tx metadata.Tx, data []byte,
 		if err := tx.IncrementRefCount(ctx, hash); err != nil {
 			return nil, false, err
 		}
-		_ = b.indexPut(hash, *existing)
+		if err := b.indexPut(hash, *existing); err != nil {
+			return nil, false, err
+		}
 		return hash, false, nil
 	}
 
@@ -112,7 +114,7 @@ func (b *BlobStore) storeNew(ctx context.Context, tx metadata.Tx, hash, data []b
 	if b.segmentIndex != nil {
 		var h [32]byte
 		copy(h[:], hash)
-		_ = b.segmentIndex.Append(loc.SegmentID, IndexEntry{
+		if err := b.segmentIndex.Append(loc.SegmentID, IndexEntry{
 			Offset:      loc.Offset,
 			StoredSize:  uint32(len(record)),
 			LogicalSize: uint32(len(data)),
@@ -120,7 +122,9 @@ func (b *BlobStore) storeNew(ctx context.Context, tx metadata.Tx, hash, data []b
 			Hash:        h,
 			SupplierID:  uint32(supplierID),
 			DictID:      dictID,
-		})
+		}); err != nil {
+			return nil, false, err
+		}
 	}
 
 	if err := b.indexPut(hash, blob); err != nil {

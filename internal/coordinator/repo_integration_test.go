@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/little-big-files/little-big-files/internal/coordinator"
@@ -28,6 +29,57 @@ func TestRegisterShardIsIdempotentByUUID(t *testing.T) {
 	require.False(t, createdAgain)
 	require.Equal(t, first.ShardID, second.ShardID)
 	require.Equal(t, "http://shard-a-updated:8080", second.PrimaryURL)
+}
+
+func TestBootstrapDoesNotOverwriteRuntimeState(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	statsSrv := newStatsServer(t)
+	defer statsSrv.Close()
+	standbySrv := newStatsServer(t)
+	defer standbySrv.Close()
+
+	active, _, err := repo.RegisterShard(ctx, "aaaaaaa1-1111-1111-1111-111111111111", coordinator.ShardStandby, statsSrv.URL, nil)
+	require.NoError(t, err)
+	standby, _, err := repo.RegisterShard(ctx, "bbbbbbb2-2222-2222-2222-222222222222", coordinator.ShardStandby, standbySrv.URL, nil)
+	require.NoError(t, err)
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	_, err = reg.PatchShardState(ctx, active.ShardID, coordinator.ShardActive, true)
+	require.NoError(t, err)
+	_, err = reg.PatchShardState(ctx, standby.ShardID, coordinator.ShardActive, true)
+	require.NoError(t, err)
+
+	bootstrap := []map[string]any{
+		{
+			"shard_id":    active.ShardID,
+			"shard_uuid":  "aaaaaaa1-1111-1111-1111-111111111111",
+			"state":       "active",
+			"primary_url": "http://bootstrap-primary",
+		},
+		{
+			"shard_id":    standby.ShardID,
+			"shard_uuid":  "bbbbbbb2-2222-2222-2222-222222222222",
+			"state":       "standby",
+			"primary_url": "http://bootstrap-standby",
+		},
+	}
+	data, err := json.Marshal(bootstrap)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "bootstrap.json")
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+	require.NoError(t, repo.BootstrapFromFile(ctx, path))
+
+	afterActive, err := repo.GetShard(ctx, active.ShardID)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardSealed, afterActive.State)
+	require.Equal(t, statsSrv.URL, afterActive.PrimaryURL)
+
+	afterStandby, err := repo.GetShard(ctx, standby.ShardID)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardActive, afterStandby.State)
+	require.Equal(t, standbySrv.URL, afterStandby.PrimaryURL)
 }
 
 func TestRegisterShardAssignsNextShardID(t *testing.T) {
@@ -115,20 +167,32 @@ func setupCoordinatorRepo(t *testing.T) (context.Context, *coordinator.Repositor
 
 	repo, err := coordinator.NewRepository(ctx, dsn)
 	require.NoError(t, err)
+	require.NoError(t, repo.TruncateAll(ctx))
 	return ctx, repo
 }
 
 func newStatsServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	sealed := false
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/internal/stats" {
+		switch r.URL.Path {
+		case "/v1/internal/seal":
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			sealed = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "sealed"})
+			return
+		case "/v1/internal/stats":
+		default:
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"shard_id":    0,
 			"role":        "primary",
-			"read_only":   false,
+			"read_only":   sealed,
 			"total_bytes": 0,
 		})
 	}))

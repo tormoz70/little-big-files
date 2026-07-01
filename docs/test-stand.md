@@ -125,7 +125,7 @@ flowchart TB
 | 0        | active  | Принимает все записи                |
 | 1        | standby | Пустой, активируется после seal #0  |
 
-Реестр задаётся в [deploy/shards.bootstrap.json](../deploy/shards.bootstrap.json) и загружается Coordinator при старте.
+Реестр задаётся в [deploy/shards.bootstrap.json](../deploy/shards.bootstrap.json) и используется как seed при старте Coordinator (существующие runtime состояния в `shard_registry` не перезаписываются).
 
 ---
 
@@ -152,14 +152,16 @@ flowchart TB
 
 ### Почему столько контейнеров
 
-`docker-compose.sharded.yml` поднимает **13 сервисов**:
+`docker-compose.sharded.yml` по умолчанию поднимает **6 сервисов** (без профиля `replica`):
 
 | Группа | Сервисы | Кол-во |
 |--------|---------|--------|
 | Coordinator | coordinator-db, coordinator | 2 |
-| Shard 0 | db, primary, replica, sync | 4 |
-| Shard 1 | db, primary, replica, sync | 4 |
-| **Итого** | | **10 app + 3 PG** |
+| Shard 0 | db, primary | 2 |
+| Shard 1 | db, primary | 2 |
+| **Итого** | | **6** |
+
+С профилем `replica` добавляются `shard-*-replica` и `shard-*-sync` (итого 10 сервисов).
 
 Каждый шард — **изолированный** PostgreSQL и отдельные volumes для сегментов/RocksDB (на стенде dedup backend = `memory`).
 
@@ -178,7 +180,7 @@ flowchart TB
 
 - `shard_registry` — состояние шардов, URL primary/replica;
 - `global_package_index` — global_id → shard_id + local_id;
-- `global_xml_index` — content_hash → shard_id (заготовка под fan-out read).
+- `global_xml_index` — заготовка под будущий XML hash lookup (в MVP не заполняется).
 
 ### 4.2. Shard 0 (active)
 
@@ -259,7 +261,9 @@ IF active_shard.total_bytes >= SHARD_MAX_BYTES:
 **Ручной seal** (без ожидания порога):
 
 ```bash
-curl -X POST http://localhost:8080/v1/admin/seal-rotate
+curl -s -X POST http://localhost:8080/v1/admin/seal-rotate \
+  -H "Content-Type: application/json" \
+  -d '{"cluster_key":"lbf-sharded-cluster-key"}'
 ```
 
 После ротации новые POST идут на shard 1; чтение старых пакетов — по global_id с shard_id=0 (sealed, через replica).
@@ -374,6 +378,7 @@ curl -s -X POST "http://localhost:8080/v1/packages?supplier_id=1" \
 | Variable | Пример |
 |----------|--------|
 | `SYNC_PRIMARY_URL` | `http://shard-0-primary:8080` |
+| `CLUSTER_KEY` | `lbf-...` (доступ к `/v1/internal/segments`) |
 | `DATA_DIR` | `/data/segments` (volume replica) |
 | `SYNC_INTERVAL` | `15s` |
 
@@ -482,7 +487,9 @@ PY
 
 ```bash
 # Принудительная ротация
-curl -X POST http://localhost:8080/v1/admin/seal-rotate
+curl -s -X POST http://localhost:8080/v1/admin/seal-rotate \
+  -H "Content-Type: application/json" \
+  -d '{"cluster_key":"lbf-sharded-cluster-key"}'
 
 # Запомнить GID пакета до ротации (из сценария 9.1)
 curl -s "http://localhost:8080/v1/packages/$GID/original"
@@ -569,7 +576,7 @@ docker compose -f deploy/docker-compose.sharded.yml down -v
 | Coordinator 502 на POST | Shard primary не поднялся | `docker compose logs shard-0-primary` |
 | `no active shard` | Пустой shard_registry | Проверить bootstrap JSON, перезапустить coordinator |
 | GET 404 после seal | Replica segments не synced | `docker compose logs shard-0-sync`, проверить volumes |
-| Seal не срабатывает | `total_bytes < SHARD_MAX_BYTES` | Уменьшить `SHARD_MAX_BYTES` или POST `/admin/seal-rotate` |
+| Seal не срабатывает | `total_bytes < SHARD_MAX_BYTES` | Уменьшить `SHARD_MAX_BYTES` или вызвать `POST /v1/admin/seal-rotate` с `cluster_key` |
 | `active_shard_unavailable` (POST 503) | active shard недоступен по сети | Проверить `primary_url`, `GET /v1/internal/stats`, затем выполнить manual switch через `PATCH /v1/admin/shards/{id}/state` |
 | Duplicate POST медленный | Dedup memory + PG | Для нагрузки — RocksDB backend |
 | Coordinator не стартует | PG not ready | Дождаться healthcheck coordinator-db |
@@ -608,37 +615,39 @@ curl -s -X POST "localhost:8080/v1/packages?supplier_id=1" \
   -d '<?xml version="1.0"?><doc/>' | jq .
 
 # Seal вручную
-curl -X POST localhost:8080/v1/admin/seal-rotate
+curl -s -X POST localhost:8080/v1/admin/seal-rotate \
+  -H "Content-Type: application/json" \
+  -d '{"cluster_key":"lbf-sharded-cluster-key"}'
 
 # Остановить и удалить данные
 docker compose -f deploy/docker-compose.sharded.yml down -v
 ```
 
-## 16. Recovery ????? ?????? PostgreSQL
+## 16. Recovery после потери PostgreSQL
 
-???? ???????? ?? ????? ????, ?????????? ????? ???????????:
+Если metadata в PostgreSQL повреждена или утеряна, используйте `recovery-tool`:
 
 ```bash
-# dry-run (?????? ???????)
+# dry-run (по умолчанию)
 recovery-tool
 
-# ?????? ? PG + rebuild dedup index
+# применение в PostgreSQL + rebuild dedup index
 recovery-tool --apply
 ```
 
-????????? ?? ????? (????? ? `DATA_DIR`):
+Для корректного восстановления в `DATA_DIR` должны быть:
 
-| ???????? | ?????????? |
+| Артефакт | Назначение |
 |----------|------------|
 | `segment_XXXX.idx` | blob index: hash, offset, segment, sizes |
 | `ingest_journal.ndjson` | packages + package_files |
-| `../dictionaries/current.json` | ???????? Zstd dictionary |
+| `../dictionaries/current.json` | актуальный Zstd dictionary sidecar |
 
-### supplier_id ??? ekb_work2
+### supplier_id для набора ekb_work2
 
-| ????? | supplier_id ? API |
-|-------|-------------------|
+| Источник | supplier_id в API |
+|----------|-------------------|
 | `2447` | `2447` |
-| `1577-1601` | `1577` (???????? ???????? ?? ?????????) |
+| `1577-1601` | `1577` (агрегированный поставщик для стенда) |
 
-???????? API: `1..1000000`.
+Диапазон `supplier_id` в API: `1..1000000`.

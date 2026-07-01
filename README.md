@@ -7,7 +7,7 @@ Content-addressed storage for EKB XML/ZIP packages with transparent deduplicatio
 - `POST /v1/packages?supplier_id=` — always returns `201` with new `package_id` / `file_id`
 - Duplicate uploads share physical blobs (invisible to clients)
 - ZIP: stores original + unpacked members (small ZIP sync; **large ZIP async** — see below)
-- `GET /v1/packages/{id}`, `/files/{file_id}`, `/original`
+- `GET /v1/packages/{id}`, `/v1/packages/{id}/files/{file_id}`, `/v1/packages/{id}/original`
 
 ## Quick start
 
@@ -75,7 +75,7 @@ Ten test suppliers (`1001`–`1010`), example ZIPs from `examples/`. Grafana `:3
 | `COORDINATOR_BOOTSTRAP` | `./deploy/shards.bootstrap.json` | Shard registry |
 | `SHARD_MAX_BYTES` | 500 GB | Seal trigger |
 | `SEAL_CHECK_INTERVAL` | `30s` | Auto seal poll |
-| `SHARD_ID` | `0` | Shard instance id |
+| `SHARD_ID` | `0` | Local shard id; overridden by coordinator registration when `COORDINATOR_URL` is set |
 | `SHARD_ROLE` | `primary` | `primary` / `replica` |
 | `SHARD_READ_ONLY` | `false` | Sealed / replica writes blocked |
 | `SHARD_UUID` | unset | Stable shard identity for startup registration |
@@ -91,6 +91,9 @@ Hot-add and manual switching API:
 
 - `POST /v1/admin/shards` — shard startup registration / idempotent upsert by `shard_uuid`
 - `PATCH /v1/admin/shards/{id}/state` — safe manual state transition (`standby -> active` requires `confirm=true`)
+- `POST /v1/admin/seal-rotate` — manual rotate, requires cluster key (`cluster_key` in body or `X-Cluster-Key`)
+
+`global_xml_index` exists in schema but global XML hash lookup API is intentionally out of MVP scope.
 
 Shard-internal endpoints (`/v1/internal/*`: stats, seal, raw segment download/sync) require the cluster key, sent as `X-Cluster-Key: <key>` (or `Authorization: Bearer <key>`). The key is taken from `CLUSTER_KEY`, falling back to `SHARD_CLUSTER_KEY`. If neither is configured these endpoints are disabled (`503`). `shard-sync` sends the key automatically.
 

@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/little-big-files/little-big-files/internal/globalid"
@@ -28,6 +30,7 @@ type Registry struct {
 	shardMaxBytes int64
 	clusterKey    string
 	client        *http.Client
+	rotationMu    sync.Mutex
 }
 
 type StatusError struct {
@@ -35,6 +38,8 @@ type StatusError struct {
 	Code   string
 	Cause  error
 }
+
+var ErrRotationIncomplete = errors.New("rotation incomplete")
 
 func (e *StatusError) Error() string {
 	if e.Cause != nil {
@@ -82,6 +87,9 @@ func (reg *Registry) RegisterShard(ctx context.Context, shardUUID string, state 
 }
 
 func (reg *Registry) PatchShardState(ctx context.Context, shardID int, nextState ShardState, confirm bool) (*ShardInfo, error) {
+	reg.rotationMu.Lock()
+	defer reg.rotationMu.Unlock()
+
 	target, err := reg.repo.GetShard(ctx, shardID)
 	if err != nil {
 		return nil, err
@@ -89,20 +97,70 @@ func (reg *Registry) PatchShardState(ctx context.Context, shardID int, nextState
 	if target == nil {
 		return nil, ErrShardNotFound
 	}
-	if nextState == ShardActive {
+
+	switch nextState {
+	case ShardSealed:
+		if target.State != ShardActive {
+			return nil, ErrStateConflict
+		}
+		if _, _, err := reg.sealShardAndPersist(ctx, target, "manual_seal"); err != nil {
+			return nil, err
+		}
+		updated, err := reg.repo.GetShard(ctx, shardID)
+		if err != nil {
+			return nil, err
+		}
+		if updated == nil {
+			return nil, ErrShardNotFound
+		}
+		return updated, nil
+	case ShardActive:
+		if target.State != ShardStandby || !confirm {
+			return nil, ErrStateConflict
+		}
 		if _, err := reg.FetchStats(ctx, target.PrimaryURL); err != nil {
 			_ = reg.repo.MarkShardUnreachable(ctx, target.ShardID, err.Error())
 			metrics.SetCoordinatorShardUp(strconv.Itoa(target.ShardID), string(target.State), false)
+			metrics.IncCoordinatorShardFailures(strconv.Itoa(target.ShardID), "manual_promote")
 			return nil, fmt.Errorf("%w: target standby shard is unavailable", ErrStateConflict)
 		}
+		_ = reg.repo.MarkShardReachable(ctx, target.ShardID)
+		metrics.SetCoordinatorShardUp(strconv.Itoa(target.ShardID), string(target.State), true)
+
+		var sealed *SealedShardTransition
+		active, err := reg.repo.ActiveShard(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if active != nil && active.ShardID != target.ShardID {
+			total, sealedAt, err := reg.sealShardRemote(ctx, active, "manual_promote")
+			if err != nil {
+				return nil, err
+			}
+			sealed = &SealedShardTransition{
+				ShardID:    active.ShardID,
+				TotalBytes: total,
+				SealedAt:   sealedAt,
+			}
+		}
+
+		updated, err := reg.repo.PromoteStandby(ctx, target.ShardID, sealed)
+		if err != nil {
+			if sealed != nil {
+				metrics.IncCoordinatorShardFailures(strconv.Itoa(sealed.ShardID), "manual_promote_commit")
+				return nil, fmt.Errorf("%w: %w", ErrRotationIncomplete, err)
+			}
+			return nil, err
+		}
+		if sealed != nil {
+			metrics.SetCoordinatorShardUp(strconv.Itoa(sealed.ShardID), string(ShardSealed), true)
+		}
+		_ = reg.repo.MarkShardReachable(ctx, updated.ShardID)
+		metrics.SetCoordinatorShardUp(strconv.Itoa(updated.ShardID), string(updated.State), true)
+		return updated, nil
+	default:
+		return nil, ErrStateConflict
 	}
-	updated, err := reg.repo.PatchShardState(ctx, shardID, nextState, confirm)
-	if err != nil {
-		return nil, err
-	}
-	_ = reg.repo.MarkShardReachable(ctx, shardID)
-	metrics.SetCoordinatorShardUp(strconv.Itoa(updated.ShardID), string(updated.State), true)
-	return updated, nil
 }
 
 // ReadURL picks the shard HTTP base for package reads.
@@ -137,17 +195,24 @@ func (reg *Registry) FetchStats(ctx context.Context, baseURL string) (*shardStat
 }
 
 func (reg *Registry) SealShard(ctx context.Context, shard *ShardInfo) error {
+	reg.rotationMu.Lock()
+	defer reg.rotationMu.Unlock()
+	_, _, err := reg.sealShardAndPersist(ctx, shard, "seal")
+	return err
+}
+
+func (reg *Registry) sealShardRemote(ctx context.Context, shard *ShardInfo, op string) (int64, time.Time, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, shard.PrimaryURL+"/v1/internal/seal", nil)
 	if err != nil {
-		return err
+		return 0, time.Time{}, err
 	}
 	reg.setInternalAuth(req)
 	resp, err := reg.client.Do(req)
 	if err != nil {
 		_ = reg.repo.MarkShardUnreachable(ctx, shard.ShardID, err.Error())
 		metrics.SetCoordinatorShardUp(strconv.Itoa(shard.ShardID), string(shard.State), false)
-		metrics.IncCoordinatorShardFailures(strconv.Itoa(shard.ShardID), "seal")
-		return err
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(shard.ShardID), op)
+		return 0, time.Time{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -155,8 +220,8 @@ func (reg *Registry) SealShard(ctx context.Context, shard *ShardInfo) error {
 		msg := fmt.Sprintf("seal %s: %s", resp.Status, string(body))
 		_ = reg.repo.MarkShardUnreachable(ctx, shard.ShardID, msg)
 		metrics.SetCoordinatorShardUp(strconv.Itoa(shard.ShardID), string(shard.State), false)
-		metrics.IncCoordinatorShardFailures(strconv.Itoa(shard.ShardID), "seal")
-		return errors.New(msg)
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(shard.ShardID), op)
+		return 0, time.Time{}, errors.New(msg)
 	}
 	now := time.Now().UTC()
 	st, _ := reg.FetchStats(ctx, shard.PrimaryURL)
@@ -166,10 +231,25 @@ func (reg *Registry) SealShard(ctx context.Context, shard *ShardInfo) error {
 	}
 	_ = reg.repo.MarkShardReachable(ctx, shard.ShardID)
 	metrics.SetCoordinatorShardUp(strconv.Itoa(shard.ShardID), string(shard.State), true)
-	return reg.repo.SetShardState(ctx, shard.ShardID, ShardSealed, total, &now)
+	return total, now, nil
+}
+
+func (reg *Registry) sealShardAndPersist(ctx context.Context, shard *ShardInfo, op string) (int64, time.Time, error) {
+	total, sealedAt, err := reg.sealShardRemote(ctx, shard, op)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if err := reg.repo.SetShardState(ctx, shard.ShardID, ShardSealed, total, &sealedAt); err != nil {
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(shard.ShardID), op+"_persist")
+		return 0, time.Time{}, err
+	}
+	metrics.SetCoordinatorShardUp(strconv.Itoa(shard.ShardID), string(ShardSealed), true)
+	return total, sealedAt, nil
 }
 
 func (reg *Registry) ActivateStandby(ctx context.Context) (*ShardInfo, error) {
+	reg.rotationMu.Lock()
+	defer reg.rotationMu.Unlock()
 	standby, err := reg.repo.StandbyShard(ctx)
 	if err != nil {
 		return nil, err
@@ -177,10 +257,6 @@ func (reg *Registry) ActivateStandby(ctx context.Context) (*ShardInfo, error) {
 	if standby == nil {
 		return nil, fmt.Errorf("no standby shard available")
 	}
-	return reg.activateStandby(ctx, standby)
-}
-
-func (reg *Registry) activateStandby(ctx context.Context, standby *ShardInfo) (*ShardInfo, error) {
 	if _, err := reg.FetchStats(ctx, standby.PrimaryURL); err != nil {
 		_ = reg.repo.MarkShardUnreachable(ctx, standby.ShardID, err.Error())
 		metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), false)
@@ -189,13 +265,21 @@ func (reg *Registry) activateStandby(ctx context.Context, standby *ShardInfo) (*
 	}
 	_ = reg.repo.MarkShardReachable(ctx, standby.ShardID)
 	metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), true)
-	if err := reg.repo.SetShardState(ctx, standby.ShardID, ShardActive, 0, nil); err != nil {
+	updated, err := reg.repo.PromoteStandby(ctx, standby.ShardID, nil)
+	if err != nil {
 		return nil, err
 	}
-	return reg.repo.GetShard(ctx, standby.ShardID)
+	return updated, nil
 }
 
 func (reg *Registry) SealAndRotate(ctx context.Context) error {
+	reg.rotationMu.Lock()
+	defer reg.rotationMu.Unlock()
+
+	return reg.sealAndRotateLocked(ctx)
+}
+
+func (reg *Registry) sealAndRotateLocked(ctx context.Context) error {
 	active, err := reg.repo.ActiveShard(ctx)
 	if err != nil {
 		return err
@@ -220,13 +304,23 @@ func (reg *Registry) SealAndRotate(ctx context.Context) error {
 	metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), true)
 
 	slog.Info("sealing active shard", "shard_id", active.ShardID)
-	if err := reg.SealShard(ctx, active); err != nil {
-		return err
-	}
-	next, err := reg.activateStandby(ctx, standby)
+	total, sealedAt, err := reg.sealShardRemote(ctx, active, "rotate")
 	if err != nil {
 		return err
 	}
+	next, err := reg.repo.PromoteStandby(ctx, standby.ShardID, &SealedShardTransition{
+		ShardID:    active.ShardID,
+		TotalBytes: total,
+		SealedAt:   sealedAt,
+	})
+	if err != nil {
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(active.ShardID), "rotate_commit")
+		return fmt.Errorf("%w: %w", ErrRotationIncomplete, err)
+	}
+	_ = reg.repo.MarkShardReachable(ctx, active.ShardID)
+	metrics.SetCoordinatorShardUp(strconv.Itoa(active.ShardID), string(ShardSealed), true)
+	_ = reg.repo.MarkShardReachable(ctx, next.ShardID)
+	metrics.SetCoordinatorShardUp(strconv.Itoa(next.ShardID), string(next.State), true)
 	slog.Info("activated standby shard", "shard_id", next.ShardID)
 	return nil
 }
@@ -265,11 +359,18 @@ func (reg *Registry) ProxyPost(ctx context.Context, supplierID int, body []byte,
 			Cause:  fmt.Errorf("no active shard"),
 		}
 	}
-	url := active.PrimaryURL + "/v1/packages?supplier_id=" + strconv.Itoa(supplierID)
-	if filename != "" {
-		url += "&filename=" + filename
+	targetURL, err := url.Parse(active.PrimaryURL + "/v1/packages")
+	if err != nil {
+		return nil, 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	query := targetURL.Query()
+	query.Set("supplier_id", strconv.Itoa(supplierID))
+	if filename != "" {
+		query.Set("filename", filename)
+	}
+	targetURL.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -290,19 +391,38 @@ func (reg *Registry) ProxyPost(ctx context.Context, supplierID int, body []byte,
 		return nil, 0, err
 	}
 	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= http.StatusInternalServerError {
+			msg := fmt.Sprintf("active shard returned status %d", resp.StatusCode)
+			_ = reg.repo.MarkShardUnreachable(ctx, active.ShardID, msg)
+			metrics.SetCoordinatorShardUp(strconv.Itoa(active.ShardID), string(active.State), false)
+			metrics.IncCoordinatorShardFailures(strconv.Itoa(active.ShardID), "write_http")
+			return nil, http.StatusServiceUnavailable, &StatusError{
+				Status: http.StatusServiceUnavailable,
+				Code:   "active_shard_unavailable",
+				Cause:  errors.New(msg),
+			}
+		}
 		_ = reg.repo.MarkShardReachable(ctx, active.ShardID)
 		metrics.SetCoordinatorShardUp(strconv.Itoa(active.ShardID), string(active.State), true)
 		return data, resp.StatusCode, nil
 	}
 	var pkg map[string]any
 	if err := json.Unmarshal(data, &pkg); err != nil {
-		return data, resp.StatusCode, err
+		return nil, http.StatusBadGateway, &StatusError{
+			Status: http.StatusBadGateway,
+			Code:   "invalid_shard_response",
+			Cause:  err,
+		}
 	}
-	localID, ok := pkg["package_id"].(float64)
+	localID, ok := asJSONInt64(pkg["package_id"])
 	if !ok {
-		return data, resp.StatusCode, fmt.Errorf("missing package_id in shard response")
+		return nil, http.StatusBadGateway, &StatusError{
+			Status: http.StatusBadGateway,
+			Code:   "invalid_shard_response",
+			Cause:  fmt.Errorf("missing package_id in shard response"),
+		}
 	}
-	globalID := globalid.Encode(active.ShardID, int64(localID))
+	globalID := globalid.Encode(active.ShardID, localID)
 	pkg["package_id"] = globalID
 	if links, ok := pkg["links"].(map[string]any); ok {
 		links["self"] = fmt.Sprintf("/v1/packages/%d", globalID)
@@ -311,8 +431,8 @@ func (reg *Registry) ProxyPost(ctx context.Context, supplierID int, body []byte,
 	if files, ok := pkg["files"].([]any); ok {
 		for _, f := range files {
 			if m, ok := f.(map[string]any); ok {
-				if fid, ok := m["file_id"].(float64); ok {
-					m["download_url"] = fmt.Sprintf("/v1/packages/%d/files/%d", globalID, int64(fid))
+				if fid, ok := asJSONInt64(m["file_id"]); ok {
+					m["download_url"] = fmt.Sprintf("/v1/packages/%d/files/%d", globalID, fid)
 				}
 			}
 		}
@@ -322,44 +442,62 @@ func (reg *Registry) ProxyPost(ctx context.Context, supplierID int, body []byte,
 		return data, resp.StatusCode, err
 	}
 	pkgHash := hashPackage(body)
-	supplier := int(pkg["supplier_id"].(float64))
+	supplier64, ok := asJSONInt64(pkg["supplier_id"])
+	if !ok {
+		return nil, http.StatusBadGateway, &StatusError{
+			Status: http.StatusBadGateway,
+			Code:   "invalid_shard_response",
+			Cause:  fmt.Errorf("missing supplier_id in shard response"),
+		}
+	}
+	supplier := int(supplier64)
 	received := time.Now().UTC()
 	if ts, ok := pkg["received_at"].(string); ok {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
 			received = t
 		}
 	}
-	_ = reg.repo.InsertGlobalPackage(ctx, GlobalPackageIndex{
+	if err := reg.repo.InsertGlobalPackage(ctx, GlobalPackageIndex{
 		GlobalID:    globalID,
 		ShardID:     active.ShardID,
-		LocalID:     int64(localID),
+		LocalID:     localID,
 		SupplierID:  supplier,
 		ReceivedAt:  received,
 		PackageHash: pkgHash,
-	})
+	}); err != nil {
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(active.ShardID), "global_index")
+		return nil, http.StatusInternalServerError, &StatusError{
+			Status: http.StatusInternalServerError,
+			Code:   "global_index_write_failed",
+			Cause:  err,
+		}
+	}
 	_ = reg.repo.MarkShardReachable(ctx, active.ShardID)
 	metrics.SetCoordinatorShardUp(strconv.Itoa(active.ShardID), string(active.State), true)
-	reg.indexXMLFromPackage(ctx, active.ShardID, active.PrimaryURL, int64(localID))
+	reg.indexXMLFromPackage(ctx, active.ShardID, active.PrimaryURL, localID)
 	return out, http.StatusCreated, nil
 }
 
+func asJSONInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
 func (reg *Registry) indexXMLFromPackage(ctx context.Context, shardID int, baseURL string, localID int64) {
-	url := fmt.Sprintf("%s/v1/packages/%d", baseURL, localID)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	resp, err := reg.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return
-	}
-	defer resp.Body.Close()
-	var pkg map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&pkg); err != nil {
-		return
-	}
-	// Blob hashes are internal; index skipped unless shard exposes them later.
+	// Global XML index is intentionally out of scope for the current MVP.
+	// Coordinator keeps per-package global routing only.
+	_ = ctx
 	_ = shardID
+	_ = baseURL
+	_ = localID
 }
 
 func (reg *Registry) ProxyGet(ctx context.Context, globalID int64, pathSuffix string) ([]byte, int, string, error) {

@@ -146,16 +146,26 @@ func (t *memTx) CreatePackageFile(ctx context.Context, packageID int64, in metad
 	return id, nil
 }
 
-func (t *memTx) UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) error {
+func (t *memTx) GetPackageForUpdate(ctx context.Context, packageID int64) (*metadata.Package, error) {
+	p, ok := t.repo.pkgs[packageID]
+	if !ok {
+		return nil, nil
+	}
+	cp := p
+	cp.Files = listFiles(t.repo.files, packageID)
+	return &cp, nil
+}
+
+func (t *memTx) UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) (bool, error) {
 	p, ok := t.repo.pkgs[packageID]
 	if !ok || p.StorageMode != "raw_large" {
-		return nil
+		return false, nil
 	}
 	p.StorageMode = storageMode
 	p.FileCount = fileCount
 	p.UnpackError = unpackError
 	t.repo.pkgs[packageID] = p
-	return nil
+	return true, nil
 }
 
 func (r *MemoryRepository) FindCanonicalPackageID(ctx context.Context, packageHash []byte) (*int64, error) {

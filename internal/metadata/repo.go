@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -42,16 +43,21 @@ func RunMigrations(ctx context.Context, dsn, migrationsDir string) error {
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
-		sql, err := os.ReadFile(filepath.Join(migrationsDir, e.Name()))
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sql, err := os.ReadFile(filepath.Join(migrationsDir, name))
 		if err != nil {
 			return err
 		}
 		if _, err := pool.Exec(ctx, string(sql)); err != nil {
-			return fmt.Errorf("migration %s: %w", e.Name(), err)
+			return fmt.Errorf("migration %s: %w", name, err)
 		}
 	}
 	return nil
@@ -162,12 +168,36 @@ func (t *pgTx) CreatePackageFile(ctx context.Context, packageID int64, in Create
 	return id, err
 }
 
-func (t *pgTx) UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) error {
-	_, err := t.tx.Exec(ctx, `
+func (t *pgTx) GetPackageForUpdate(ctx context.Context, packageID int64) (*Package, error) {
+	row := t.tx.QueryRow(ctx, `
+		SELECT id, supplier_id, received_at, package_hash, payload_type, storage_mode,
+		       original_filename, canonical_package_id, file_count, unpack_error
+		FROM packages
+		WHERE id = $1
+		FOR UPDATE`, packageID)
+	var p Package
+	err := row.Scan(
+		&p.ID, &p.SupplierID, &p.ReceivedAt, &p.PackageHash, &p.PayloadType, &p.StorageMode,
+		&p.OriginalFilename, &p.CanonicalPackageID, &p.FileCount, &p.UnpackError,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (t *pgTx) UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) (bool, error) {
+	tag, err := t.tx.Exec(ctx, `
 		UPDATE packages SET storage_mode = $2, file_count = $3, unpack_error = $4
 		WHERE id = $1 AND storage_mode = 'raw_large'`,
 		packageID, storageMode, fileCount, unpackError)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func (r *PostgresRepository) FindCanonicalPackageID(ctx context.Context, packageHash []byte) (*int64, error) {
@@ -203,19 +233,23 @@ func (r *PostgresRepository) ListClonePackageIDs(ctx context.Context, canonicalI
 
 func (r *PostgresRepository) ClonePackageRefs(ctx context.Context, canonicalID, newPackageID int64) error {
 	return r.WithTx(ctx, func(tx Tx) error {
+		pg, ok := tx.(*pgTx)
+		if !ok {
+			return fmt.Errorf("unexpected tx type %T", tx)
+		}
 		var unpackErr *string
-		err := r.pool.QueryRow(ctx, `SELECT unpack_error FROM packages WHERE id = $1`, canonicalID).Scan(&unpackErr)
+		err := pg.tx.QueryRow(ctx, `SELECT unpack_error FROM packages WHERE id = $1`, canonicalID).Scan(&unpackErr)
 		if err != nil && err != pgx.ErrNoRows {
 			return err
 		}
 		if err == nil && unpackErr != nil {
-			_, err = r.pool.Exec(ctx, `UPDATE packages SET unpack_error = $2 WHERE id = $1`, newPackageID, unpackErr)
+			_, err = pg.tx.Exec(ctx, `UPDATE packages SET unpack_error = $2 WHERE id = $1`, newPackageID, unpackErr)
 			if err != nil {
 				return err
 			}
 		}
 
-		rows, err := r.pool.Query(ctx, `
+		rows, err := pg.tx.Query(ctx, `
 			SELECT blob_hash, role, original_filename, sequence_number
 			FROM package_files WHERE package_id = $1 ORDER BY id`, canonicalID)
 		if err != nil {
@@ -477,7 +511,8 @@ func (r *PostgresRepository) TruncateRecoveryTables(ctx context.Context) error {
 
 func (r *PostgresRepository) RecomputeRefCounts(ctx context.Context) error {
 	_, err := r.pool.Exec(ctx, `
-		UPDATE content_blobs b SET ref_count = COALESCE(x.cnt, 0)
+		UPDATE content_blobs SET ref_count = 0;
+		UPDATE content_blobs b SET ref_count = x.cnt
 		FROM (
 			SELECT blob_hash, COUNT(*)::bigint AS cnt FROM package_files GROUP BY blob_hash
 		) x

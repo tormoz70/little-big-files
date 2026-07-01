@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -143,4 +144,11 @@ func envFloat(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+func (c Config) EffectiveClusterKey() string {
+	if key := strings.TrimSpace(c.ClusterKey); key != "" {
+		return key
+	}
+	return strings.TrimSpace(c.ShardClusterKey)
 }

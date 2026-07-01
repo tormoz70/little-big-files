@@ -4,12 +4,27 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
+
+type RegisterShardStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *RegisterShardStatusError) Error() string {
+	return fmt.Sprintf("register shard failed: status=%d body=%s", e.StatusCode, e.Body)
+}
+
+func (e *RegisterShardStatusError) IsRetryable() bool {
+	return e.StatusCode == http.StatusRequestTimeout || e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= http.StatusInternalServerError
+}
 
 func RegisterShardWithRetry(ctx context.Context, coordinatorURL string, req RegisterShardRequest) (*RegisterShardResponse, error) {
 	delay := 500 * time.Millisecond
@@ -17,6 +32,9 @@ func RegisterShardWithRetry(ctx context.Context, coordinatorURL string, req Regi
 		resp, err := RegisterShardOnce(ctx, coordinatorURL, req)
 		if err == nil {
 			return resp, nil
+		}
+		if !shouldRetryRegister(err) {
+			return nil, err
 		}
 
 		timer := time.NewTimer(delay)
@@ -58,11 +76,26 @@ func RegisterShardOnce(ctx context.Context, coordinatorURL string, req RegisterS
 		return nil, err
 	}
 	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("register shard failed: status=%d body=%s", httpResp.StatusCode, string(body))
+		return nil, &RegisterShardStatusError{
+			StatusCode: httpResp.StatusCode,
+			Body:       string(body),
+		}
 	}
 	var resp RegisterShardResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+func shouldRetryRegister(err error) bool {
+	var statusErr *RegisterShardStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.IsRetryable()
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return false
 }

@@ -1,4 +1,4 @@
-.PHONY: build test run migrate docker-up rebuild-index
+.PHONY: build test run migrate migrate-all docker-up rebuild-index
 
 build:
 	go build -o bin/server ./cmd/server
@@ -25,7 +25,10 @@ run: build
 	PG_DSN=postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable DATA_DIR=./data/segments ./bin/server
 
 migrate:
-	go run ./cmd/server
+	go run ./cmd/migrate --metadata
+
+migrate-all:
+	go run ./cmd/migrate --metadata --coordinator
 
 rebuild-index:
 	go run ./cmd/rebuild-index

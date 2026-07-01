@@ -144,7 +144,26 @@ func (s *Server) listShards(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sealRotate(w http.ResponseWriter, r *http.Request) {
+	var req SealRotateRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+			return
+		}
+	}
+	if err := s.validateClusterKey(clusterKeyFromRequest(req.ClusterKey, r)); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := s.registry.SealAndRotate(r.Context()); err != nil {
+		if errors.Is(err, ErrStateConflict) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrRotationIncomplete) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -298,7 +317,7 @@ func writeRaw(w http.ResponseWriter, status int, ct string, data []byte) {
 }
 
 func (s *Server) validateClusterKey(provided string) error {
-	expected := strings.TrimSpace(s.cfg.ClusterKey)
+	expected := s.cfg.EffectiveClusterKey()
 	if expected == "" {
 		return errStr("cluster key is not configured")
 	}
@@ -306,6 +325,20 @@ func (s *Server) validateClusterKey(provided string) error {
 		return errStr("invalid cluster key")
 	}
 	return nil
+}
+
+func clusterKeyFromRequest(explicit string, r *http.Request) string {
+	if key := strings.TrimSpace(explicit); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(r.Header.Get("X-Cluster-Key")); key != "" {
+		return key
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[len("bearer "):])
+	}
+	return ""
 }
 
 func isUUID(value string) bool {

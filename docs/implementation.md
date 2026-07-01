@@ -122,7 +122,7 @@ Coordinator API:
 | `/v1/packages/{global_id}/original` | `GET` | Proxy original read. |
 | `/v1/admin/shards` | `GET` | Список шардов. |
 | `/v1/admin/shards` | `POST` | Startup registration/upsert shard by UUID. Требует `cluster_key` в body. |
-| `/v1/admin/seal-rotate` | `POST` | Manual seal active + activate standby. |
+| `/v1/admin/seal-rotate` | `POST` | Manual seal active + activate standby. Требует `cluster_key` в body или `X-Cluster-Key`. |
 | `/v1/admin/shards/{id}/state` | `PATCH` | Safe manual state transition. Требует `cluster_key` в body. |
 
 ## 5. Основной write path: XML
@@ -593,7 +593,7 @@ sequenceDiagram
 - `received_at`;
 - `package_hash`.
 
-`global_xml_index` присутствует, но в текущей реализации `indexXMLFromPackage` не заполняет blob hashes, так как shard package response не раскрывает internal blob hash.
+`global_xml_index` присутствует как schema-заготовка, но в текущем MVP intentionally не заполняется и не используется публичным API.
 
 ## 12. Отказоустойчивость
 
@@ -740,7 +740,8 @@ Mutating admin operations проверяют `cluster_key` в JSON body:
 
 Замечание:
 
-- `POST /v1/admin/seal-rotate` в текущей реализации не проверяет `cluster_key` в body. Если endpoint доступен вне доверенной сети, его нужно защитить аналогично. Рекомендуется закрывать Coordinator admin API сетевыми политиками/reverse proxy auth.
+- `POST /v1/admin/seal-rotate` проверяет cluster key (`cluster_key` в body или `X-Cluster-Key`).
+- Coordinator admin API всё равно рекомендуется ограничивать сетевыми политиками/reverse proxy auth.
 
 ### 13.5. ShardGuard write protection
 
@@ -815,11 +816,10 @@ Middleware `metrics.Middleware` измеряет HTTP requests/latency.
 
 ## 16. Known limitations / дальнейшие улучшения
 
-1. `POST /v1/admin/seal-rotate` следует защитить `cluster_key` или отдельным admin auth.
+1. `global_xml_index` и lookup по XML hash пока вне scope MVP (реализован только routing по global package id).
 2. Coordinator currently does not send cluster key on public shard proxy requests; this is fine because public `/v1/packages` on shards remains unauthenticated inside the trusted cluster. If shards are exposed outside the private network, add service-to-service auth.
-3. `global_xml_index` пока не заполняется, потому что package response не раскрывает blob hashes.
-4. Нет лимита total uncompressed ZIP size/ratio; стоит добавить защиту от zip bombs.
-5. `DEDUP_BACKEND=memory` подходит для stand/dev; production должен использовать persistent backend (`rocksdb`) и реалистичный Bloom sizing.
-6. Старые segment files без CRC32C trailer несовместимы с новым форматом. Для pre-production это приемлемо; для production migration нужен compatibility reader.
-7. Segment orphan bytes не чистятся (append-only design). Для production можно добавить offline compaction, если wasted space станет значимым.
-8. Filename в `Content-Disposition` стоит дополнительно sanitize/escape.
+3. Нет лимита total uncompressed ZIP size/ratio; стоит добавить защиту от zip bombs.
+4. `DEDUP_BACKEND=memory` подходит для stand/dev; production должен использовать persistent backend (`rocksdb`) и реалистичный Bloom sizing.
+5. Старые segment files без CRC32C trailer несовместимы с новым форматом. Для pre-production это приемлемо; для production migration нужен compatibility reader.
+6. Segment orphan bytes не чистятся (append-only design). Для production можно добавить offline compaction, если wasted space станет значимым.
+7. Filename в `Content-Disposition` стоит дополнительно sanitize/escape.

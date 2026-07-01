@@ -12,7 +12,7 @@
 
 | VM | Сервисы | vCPU | RAM | Диск |
 |----|---------|------|-----|------|
-| `lbf-coord` | `coordinator`, `coordinator-db`, `nginx` (TLS), `prometheus`, `grafana` | 4 | 8 GB | 100 GB SSD |
+| `lbf-coord` | `coordinator`, `coordinator-db`, `prometheus`, `grafana` (+ внешний reverse proxy/TLS) | 4 | 8 GB | 100 GB SSD |
 | `lbf-shard-0` | `shard-0-primary`, `shard-0-db` (active) | 8 | 16 GB | NVMe 500 GB-1 TB |
 | `lbf-shard-1` | `shard-1-primary`, `shard-1-db` (standby) | 4 | 8 GB | 200 GB SSD |
 | `lbf-shard-2` *(опц.)* | `shard-2-primary`, `shard-2-db` (standby) | 4 | 8 GB | 200 GB SSD |
@@ -60,7 +60,7 @@
 
 | Переменная | Значение для пилота |
 |------------|---------------------|
-| `SHARD_ID` | `0`, `1`, `2` |
+| `SHARD_ID` | optional fallback for standalone start |
 | `SHARD_ROLE` | `primary` |
 | `SHARD_READ_ONLY` | `false` (до seal) |
 | `SHARD_UUID` | стабильный UUID шарда |
@@ -81,6 +81,7 @@
 | `SHARD_ROLE` | `replica` |
 | `SHARD_READ_ONLY` | `true` |
 | `SYNC_PRIMARY_URL` | `http://lbf-shard-N.internal:8080` |
+| `CLUSTER_KEY` | тот же ключ кластера для `/v1/internal/segments` |
 
 ---
 
@@ -128,6 +129,9 @@ Mutating admin операции выполняются с `cluster_key`:
 
 - `POST /v1/admin/shards` — idempotent registration по `shard_uuid`
 - `PATCH /v1/admin/shards/{id}/state` — ручной switch (`standby -> active` только с `confirm=true`)
+- `POST /v1/admin/seal-rotate` — manual rotate (требует `cluster_key` в body или `X-Cluster-Key`)
+
+`COORDINATOR_BOOTSTRAP` используется как seed-реестр: после первого создания shard rows coordinator не перезаписывает runtime state (`active/sealed/standby`) при рестарте.
 
 При недоступности `active` coordinator работает в режиме fail-closed: `POST /v1/packages` возвращает `503 active_shard_unavailable` до ручного переключения.
 
@@ -143,7 +147,8 @@ Mutating admin операции выполняются с `cluster_key`:
 - регулярный тест восстановления:
 
 ```bash
-recovery-tool --dry-run
+# dry-run по умолчанию
+recovery-tool
 recovery-tool --apply
 ```
 

@@ -46,11 +46,11 @@ func (s *Service) SetJournal(j *recovery.Journal) {
 	s.journal = j
 }
 
-func (s *Service) journalPackage(pkg *metadata.Package) {
+func (s *Service) journalPackage(pkg *metadata.Package) error {
 	if s.journal == nil || pkg == nil {
-		return
+		return nil
 	}
-	_ = s.journal.Append(recovery.EntryFromPackage(pkg))
+	return s.journal.Append(recovery.EntryFromPackage(pkg))
 }
 
 func (s *Service) loadAndJournal(ctx context.Context, packageID int64) (*metadata.Package, error) {
@@ -58,7 +58,9 @@ func (s *Service) loadAndJournal(ctx context.Context, packageID int64) (*metadat
 	if err != nil {
 		return nil, err
 	}
-	s.journalPackage(pkg)
+	if err := s.journalPackage(pkg); err != nil {
+		return nil, err
+	}
 	return pkg, nil
 }
 

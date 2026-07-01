@@ -52,6 +52,21 @@ func TestLoadIgnoresInvalidEnv(t *testing.T) {
 	require.Equal(t, 100*time.Millisecond, cfg.WriteBufferInterval)
 }
 
+func TestEffectiveClusterKeyPrefersClusterKey(t *testing.T) {
+	cfg := config.Config{
+		ClusterKey:     "cluster",
+		ShardClusterKey: "shard",
+	}
+	require.Equal(t, "cluster", cfg.EffectiveClusterKey())
+}
+
+func TestEffectiveClusterKeyFallsBackToShardClusterKey(t *testing.T) {
+	cfg := config.Config{
+		ShardClusterKey: "shard-only",
+	}
+	require.Equal(t, "shard-only", cfg.EffectiveClusterKey())
+}
+
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{

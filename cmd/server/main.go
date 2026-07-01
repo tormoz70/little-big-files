@@ -23,6 +23,7 @@ import (
 
 func main() {
 	cfg := config.Load()
+	cfg.ClusterKey = cfg.EffectiveClusterKey()
 	ctx := context.Background()
 
 	if cfg.ShardRole != "replica" {
@@ -107,8 +108,8 @@ func main() {
 			slog.Error("SHARD_UUID is required when COORDINATOR_URL is set")
 			os.Exit(1)
 		}
-		if cfg.ShardClusterKey == "" {
-			slog.Error("SHARD_CLUSTER_KEY is required when COORDINATOR_URL is set")
+		if cfg.ClusterKey == "" {
+			slog.Error("CLUSTER_KEY (or SHARD_CLUSTER_KEY) is required when COORDINATOR_URL is set")
 			os.Exit(1)
 		}
 		if cfg.ShardAdvertiseURL == "" {
@@ -121,7 +122,7 @@ func main() {
 		}
 		resp, err := coordinator.RegisterShardWithRetry(ctx, cfg.CoordinatorURL, coordinator.RegisterShardRequest{
 			ShardUUID:    cfg.ShardUUID,
-			ClusterKey:   cfg.ShardClusterKey,
+			ClusterKey:   cfg.ClusterKey,
 			PrimaryURL:   cfg.ShardAdvertiseURL,
 			StartupState: startupState,
 		})

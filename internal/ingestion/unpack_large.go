@@ -2,11 +2,15 @@ package ingestion
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/little-big-files/little-big-files/internal/metadata"
 	"github.com/little-big-files/little-big-files/internal/storage"
 )
+
+var errSkipLargeUnpack = errors.New("large zip package already unpacked")
 
 // persistZipMembers adds member or unpack_error rows after original already exists.
 func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, supplierID int, members []ZipMember, unpackErr error, counters *ingestCounters) (fileCount int, unpackErrText *string, err error) {
@@ -69,6 +73,13 @@ func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error
 	if pkg == nil {
 		return fmt.Errorf("package %d not found", packageID)
 	}
+	if pkg.StorageMode == StorageZipWithMembers {
+		if err := s.propagateUnpackToClones(ctx, packageID); err != nil {
+			return err
+		}
+		_, err = s.loadAndJournal(ctx, packageID)
+		return err
+	}
 	if pkg.StorageMode != StorageRawLarge {
 		return nil
 	}
@@ -99,16 +110,39 @@ func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error
 	var fileCount int
 	var unpackErrText *string
 	err = s.repo.WithTx(ctx, func(tx metadata.Tx) error {
-		// Re-check under transaction via fresh read would be ideal; accept rare double-unpack race for v1.
-		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, pkg.SupplierID, members, unpackErr, nil)
+		lockedPkg, err := tx.GetPackageForUpdate(ctx, packageID)
+		if err != nil {
+			return err
+		}
+		if lockedPkg == nil {
+			return fmt.Errorf("package %d not found", packageID)
+		}
+		if lockedPkg.StorageMode != StorageRawLarge {
+			return errSkipLargeUnpack
+		}
+		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, lockedPkg.SupplierID, members, unpackErr, nil)
 		if err != nil {
 			return err
 		}
 		fileCount = fc
 		unpackErrText = uet
-		return tx.UpdatePackageAfterUnpack(ctx, packageID, StorageZipWithMembers, fileCount, unpackErrText)
+		updated, err := tx.UpdatePackageAfterUnpack(ctx, packageID, StorageZipWithMembers, fileCount, unpackErrText)
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errSkipLargeUnpack
+		}
+		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errSkipLargeUnpack) {
+			if err := s.propagateUnpackToClones(ctx, packageID); err != nil {
+				return err
+			}
+			_, err = s.loadAndJournal(ctx, packageID)
+			return err
+		}
 		return err
 	}
 
@@ -148,10 +182,21 @@ func (s *Service) propagateUnpackToClones(ctx context.Context, canonicalID int64
 		if clone == nil || clone.StorageMode != StorageRawLarge {
 			continue
 		}
+		existing := make(map[string]struct{}, len(clone.Files))
+		for _, f := range clone.Files {
+			if f.Role != RoleMember && f.Role != RoleUnpackError {
+				continue
+			}
+			existing[packageFileKey(f.Role, f.BlobHash, f.OriginalFilename, f.SequenceNumber)] = struct{}{}
+		}
 
 		err = s.repo.WithTx(ctx, func(tx metadata.Tx) error {
 			var hashes [][]byte
 			for _, f := range extraFiles {
+				key := packageFileKey(f.Role, f.BlobHash, f.OriginalFilename, f.SequenceNumber)
+				if _, ok := existing[key]; ok {
+					continue
+				}
 				_, err := tx.CreatePackageFile(ctx, cloneID, metadata.CreateFileInput{
 					BlobHash:         f.BlobHash,
 					Role:             f.Role,
@@ -162,15 +207,29 @@ func (s *Service) propagateUnpackToClones(ctx context.Context, canonicalID int64
 					return err
 				}
 				hashes = append(hashes, f.BlobHash)
+				existing[key] = struct{}{}
 			}
 			if err := tx.IncrementRefCounts(ctx, hashes); err != nil {
 				return err
 			}
-			return tx.UpdatePackageAfterUnpack(ctx, cloneID, StorageZipWithMembers, canonical.FileCount, canonical.UnpackError)
+			_, err := tx.UpdatePackageAfterUnpack(ctx, cloneID, StorageZipWithMembers, canonical.FileCount, canonical.UnpackError)
+			return err
 		})
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func packageFileKey(role string, blobHash []byte, originalFilename *string, sequenceNumber *int) string {
+	name := ""
+	if originalFilename != nil {
+		name = *originalFilename
+	}
+	seq := -1
+	if sequenceNumber != nil {
+		seq = *sequenceNumber
+	}
+	return fmt.Sprintf("%s|%d|%s|%s", role, seq, name, hex.EncodeToString(blobHash))
 }

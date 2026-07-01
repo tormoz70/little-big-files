@@ -16,6 +16,7 @@ import (
 
 func main() {
 	cfg := config.Load()
+	cfg.ClusterKey = cfg.EffectiveClusterKey()
 	ctx := context.Background()
 
 	migrations := "./migrations/coordinator"

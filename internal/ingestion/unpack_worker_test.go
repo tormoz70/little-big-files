@@ -2,11 +2,13 @@ package ingestion_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/little-big-files/little-big-files/internal/config"
 	"github.com/little-big-files/little-big-files/internal/ingestion"
+	"github.com/little-big-files/little-big-files/internal/metadata"
 	"github.com/little-big-files/little-big-files/internal/storage"
 	"github.com/little-big-files/little-big-files/internal/testmetadata"
 	"github.com/stretchr/testify/require"
@@ -121,4 +123,67 @@ func TestUnpackQueueRecoversPending(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	require.Equal(t, ingestion.StorageZipWithMembers, pkg.StorageMode)
+}
+
+func TestUnpackLargePackageRetriesClonePropagationAfterFailure(t *testing.T) {
+	baseRepo := testmetadata.NewMemoryRepository()
+	repo := &flakyPropagationRepo{MemoryRepository: baseRepo}
+	segDir := t.TempDir()
+	segments, err := storage.NewSegmentManager(segDir, 64*1024*1024)
+	require.NoError(t, err)
+	defer segments.Close()
+
+	cfg := config.Config{
+		MaxBodyBytes:        16 * 1024 * 1024,
+		ZipThresholdSize:    10,
+		LargeZipAsyncUnpack: false,
+	}
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
+	svc := ingestion.NewService(cfg, repo, blobs)
+	ctx := context.Background()
+
+	zipBody := makeTestZip(t, []byte(`<?xml version="1.0"?><x/>`))
+	canonical, err := svc.ProcessPackage(ctx, 1, zipBody, strPtr("z.zip"))
+	require.NoError(t, err)
+	clone, err := svc.ProcessPackage(ctx, 2, zipBody, strPtr("z2.zip"))
+	require.NoError(t, err)
+	require.Equal(t, ingestion.StorageRawLarge, clone.StorageMode)
+
+	repo.failCloneID = clone.ID
+	err = svc.UnpackLargePackage(ctx, canonical.ID)
+	require.Error(t, err)
+
+	cloneAfterFail, err := repo.GetPackage(ctx, clone.ID)
+	require.NoError(t, err)
+	require.Equal(t, ingestion.StorageRawLarge, cloneAfterFail.StorageMode)
+
+	require.NoError(t, svc.UnpackLargePackage(ctx, canonical.ID))
+	cloneAfterRetry, err := repo.GetPackage(ctx, clone.ID)
+	require.NoError(t, err)
+	require.Equal(t, ingestion.StorageZipWithMembers, cloneAfterRetry.StorageMode)
+}
+
+type flakyPropagationRepo struct {
+	*testmetadata.MemoryRepository
+	failCloneID int64
+	failedOnce  bool
+}
+
+func (r *flakyPropagationRepo) WithTx(ctx context.Context, fn func(metadata.Tx) error) error {
+	return r.MemoryRepository.WithTx(ctx, func(tx metadata.Tx) error {
+		return fn(&flakyPropagationTx{Tx: tx, repo: r})
+	})
+}
+
+type flakyPropagationTx struct {
+	metadata.Tx
+	repo *flakyPropagationRepo
+}
+
+func (tx *flakyPropagationTx) UpdatePackageAfterUnpack(ctx context.Context, packageID int64, storageMode string, fileCount int, unpackError *string) (bool, error) {
+	if packageID == tx.repo.failCloneID && !tx.repo.failedOnce {
+		tx.repo.failedOnce = true
+		return false, fmt.Errorf("injected clone propagation failure")
+	}
+	return tx.Tx.UpdatePackageAfterUnpack(ctx, packageID, storageMode, fileCount, unpackError)
 }

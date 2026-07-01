@@ -127,7 +127,7 @@ ELSE:
 
 **Не хранит:** указатели на физическое расположение XML (это делает Hash Index в RocksDB для скорости).
 
-**В распределённой конфигурации (§7.2):** на каждом шарде — локальная PostgreSQL (метаданные шарда). На **Coordinator** — отдельная легковесная PostgreSQL с глобальным индексом (`global_package_index`, `global_xml_index`, `shard_registry`) для маршрутизации редких read-запросов.
+**В распределённой конфигурации (§7.2):** на каждом шарде — локальная PostgreSQL (метаданные шарда). На **Coordinator** — отдельная легковесная PostgreSQL с `global_package_index` и `shard_registry` для маршрутизации редких read-запросов. `global_xml_index` сохранён как заготовка и не используется в MVP.
 
 ## 4. Алгоритмы
 
@@ -732,7 +732,7 @@ CREATE TABLE supplier_stats (
 
 ```
 IF active_shard.total_bytes >= SHARD_MAX_BYTES:
-    seal(active_shard)     # read-only, fsync, checkpoint, sync replica
+    seal(active_shard)     # read-only, fsync, checkpoint
     activate(next_shard)   # pre-provisioned standby → active
 ```
 
@@ -744,7 +744,7 @@ IF active_shard.total_bytes >= SHARD_MAX_BYTES:
 |----------|---------|
 | Write `POST /packages` | Всегда на **active** primary |
 | Read `GET /packages/{global_id}` | `shard_id = global_id >> 48` → proxy на шард |
-| Read `GET /xml/{hash}` | Lookup `global_xml_index`; fallback: parallel fan-out (допустимо — чтение редкое) |
+| Read `GET /xml/{hash}` | В MVP не реализован (нет публичного endpoint и заполнения `global_xml_index`) |
 | Query по supplier + период | `global_package_index` → batch read с нужных шардов |
 
 **Глобальный package_id (64 bit):**
@@ -774,7 +774,7 @@ IF active_shard.total_bytes >= SHARD_MAX_BYTES:
 
 - Write → только primary **active** шарда
 - Read (анализ, конфликты) → replica sealed шарда (снижает нагрузку)
-- Seal блокируется до синхронизации replica
+- Sync replica выполняется sidecar-ом и не блокирует seal/rotate в текущей реализации
 
 ### 7.4. Coordinator (глобальный индекс)
 
@@ -880,8 +880,8 @@ CREATE TABLE global_xml_index (
 
 1. Дождаться завершения активных batch write
 2. Final fsync + RocksDB checkpoint
-3. Дождаться replica sync (`replica_lag < threshold`)
-4. Только then: `active → sealed`, `standby → active`
+3. Переключить состояния в coordinator (`active → sealed`, `standby → active`)
+4. Проверить sync артефактов replica отдельным контролем
 
 ## 9. Оценка эффективности
 
@@ -1085,7 +1085,7 @@ Dictionary compression (5x): 20 байт × 100M = 2 GB
 
 - `shard_bytes{state}` — объём active vs sealed
 - `coordinator_seal_total` — количество seal events
-- `shard_mirror_lag_seconds` — отставание replica
+- `coordinator_shard_up` / `coordinator_shard_failures_total` — доступность шарда и ошибки proxy/internal операций
 - `read_fanout_duration_seconds` — latency fan-out read (редкий кейс)
 - `shard_last_read_at` — «остывание» sealed шардов
 

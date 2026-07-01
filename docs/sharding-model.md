@@ -7,7 +7,7 @@
 - **Write** — всегда на один **active** шард (текущий поток данных)
 - **Seal** — когда шард заполнен (`SHARD_MAX_BYTES`) → read-only, «остывает»
 - **Read** — редко, с любого шарда через **Coordinator** + global index
-- **Зеркалирование** — primary + replica на каждый шард
+- **Зеркалирование** — primary + replica на каждый шард (MVP: HTTP sidecar sync)
 
 ---
 
@@ -39,12 +39,10 @@ flowchart TB
 
     subgraph coord_layer [Coordinator]
         gpi[(global_package_index)]
-        gxi[(global_xml_index)]
         sr[shard_registry]
     end
 
     coord --> gpi
-    coord --> gxi
     coord --> sr
 
     coord -->|write| activeP[Shard 2 Primary]
@@ -70,7 +68,7 @@ sequenceDiagram
     Coord->>Coord: resolve ActiveShard()
     Coord->>Active: proxy write
     Active-->>Coord: local_id + stats
-    Coord->>Idx: insert global_package_index, global_xml_index
+    Coord->>Idx: insert global_package_index
     Coord-->>Client: global_package_id
 ```
 
@@ -88,7 +86,6 @@ sequenceDiagram
 
     Old->>Coord: total_bytes >= SHARD_MAX_BYTES
     Coord->>Old: seal (read-only, fsync, checkpoint)
-    Coord->>Old: wait replica sync
     Coord->>Coord: shard_registry: old→sealed
     Coord->>New: activate
     Note over Coord,New: Новые writes только на New
@@ -107,9 +104,7 @@ flowchart TD
     type -->|GET /packages/id| decode["shard_id = id >> 48"]
     decode --> proxy[Proxy на shard primary/replica]
 
-    type -->|GET /xml/hash| idx{global_xml_index}
-    idx -->|found| proxy
-    idx -->|miss| fanout[Parallel fan-out всех shards]
+    type -->|GET /xml/hash| noxml[Not implemented in MVP]
 
     type -->|query by supplier+time| gpi[global_package_index]
     gpi --> proxy
@@ -134,10 +129,10 @@ flowchart TD
 
 | Компонент | Primary → Replica |
 |-----------|-------------------|
-| PostgreSQL | Streaming replication |
-| Segments | rsync/lsyncd или batch при seal |
-| RocksDB | Checkpoint copy |
-| Bloom | Copy при seal |
+| PostgreSQL | Shared DB в local/test стенде; streaming replication — target |
+| Segments | HTTP `shard-sync` sidecar |
+| RocksDB | Rebuild на replica при старте |
+| Bloom | Rebuild из metadata при старте |
 
 - **Write** → primary active shard only
 - **Read** (конфликты, анализ) → replica sealed shard (меньше нагрузка)
@@ -150,7 +145,7 @@ flowchart TD
 |----------|-----------|
 | Два supplier, один XML, active shard | 1 копия (dedup) |
 | Тот же XML после seal на новом active | 2 копии (приемлемо) |
-| Чтение старого XML | global_xml_index → нужный sealed shard |
+| Чтение старого XML | В MVP только по `global_id`; XML hash lookup не реализован |
 
 ---
 
@@ -172,5 +167,4 @@ flowchart TD
 SHARD_MAX_BYTES=536870912000   # 500 GB
 COORDINATOR_PG_DSN=...
 SHARD_ROLE=primary|replica
-STORAGE_TIER=hot|cold
 ```

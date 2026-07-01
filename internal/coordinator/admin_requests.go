@@ -24,6 +24,10 @@ type PatchShardStateRequest struct {
 	ClusterKey string `json:"cluster_key"`
 }
 
+type SealRotateRequest struct {
+	ClusterKey string `json:"cluster_key"`
+}
+
 func ParseShardState(raw string) (ShardState, error) {
 	state := ShardState(strings.ToLower(strings.TrimSpace(raw)))
 	switch state {
