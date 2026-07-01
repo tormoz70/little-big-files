@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -116,16 +117,7 @@ func main() {
 			slog.Error("SHARD_ADVERTISE_URL is required when COORDINATOR_URL is set")
 			os.Exit(1)
 		}
-		startupState := cfg.ShardStartupState
-		if startupState == "" {
-			startupState = string(coordinator.ShardStandby)
-		}
-		resp, err := coordinator.RegisterShardWithRetry(ctx, cfg.CoordinatorURL, coordinator.RegisterShardRequest{
-			ShardUUID:    cfg.ShardUUID,
-			ClusterKey:   cfg.ClusterKey,
-			PrimaryURL:   cfg.ShardAdvertiseURL,
-			StartupState: startupState,
-		})
+		resp, err := coordinator.RegisterShardWithRetry(ctx, cfg.CoordinatorURL, startupRegistrationRequest(cfg))
 		if err != nil {
 			slog.Error("shard registration failed", "err", err)
 			os.Exit(1)
@@ -172,4 +164,17 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+func startupRegistrationRequest(cfg config.Config) coordinator.RegisterShardRequest {
+	// Hot-add invariant: startup registration can only create/update standby shards.
+	if state := strings.TrimSpace(cfg.ShardStartupState); state != "" && !strings.EqualFold(state, string(coordinator.ShardStandby)) {
+		slog.Warn("SHARD_STARTUP_STATE is ignored; startup registration always uses standby", "configured_state", cfg.ShardStartupState)
+	}
+	return coordinator.RegisterShardRequest{
+		ShardUUID:    cfg.ShardUUID,
+		ClusterKey:   cfg.ClusterKey,
+		PrimaryURL:   cfg.ShardAdvertiseURL,
+		StartupState: string(coordinator.ShardStandby),
+	}
 }

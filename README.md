@@ -81,17 +81,18 @@ Ten test suppliers (`1001`–`1010`), example ZIPs from `examples/`. Grafana `:3
 | `SHARD_UUID` | unset | Stable shard identity for startup registration |
 | `SHARD_CLUSTER_KEY` | unset | Cluster key sent by shard to coordinator |
 | `SHARD_ADVERTISE_URL` | unset | Coordinator-facing URL for this shard |
-| `SHARD_STARTUP_STATE` | `standby` | Desired initial state on first registration |
+| `SHARD_STARTUP_STATE` | `standby` | Startup registration state; coordinator accepts only `standby` (`active` is rejected) |
 | `COORDINATOR_URL` | unset | Coordinator base URL for shard auto-registration |
 | `SYNC_PRIMARY_URL` | — | Replica segment sync source (shard-sync) |
 
 Architecture: clients → **Coordinator :8080** → active shard primary. Reads from sealed shards use **replica_url** when set in bootstrap; otherwise the sealed **primary** serves reads.
 
-Hot-add and manual switching API:
+Hot-add API (automatic, ends on `standby`):
 
 - `POST /v1/admin/shards` — shard startup registration / idempotent upsert by `shard_uuid`
-- `PATCH /v1/admin/shards/{id}/state` — safe manual state transition (`standby -> active` requires `confirm=true`)
 - `POST /v1/admin/seal-rotate` — manual rotate, requires cluster key (`cluster_key` in body or `X-Cluster-Key`)
+
+Manual state switch (`PATCH /v1/admin/shards/{id}/state`) is a separate recovery/failover path (`standby -> active` requires `confirm=true`), not part of normal hot-add.
 
 `global_xml_index` exists in schema but global XML hash lookup API is intentionally out of MVP scope.
 

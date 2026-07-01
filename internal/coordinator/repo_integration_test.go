@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/little-big-files/little-big-files/internal/config"
 	"github.com/little-big-files/little-big-files/internal/coordinator"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +31,84 @@ func TestRegisterShardIsIdempotentByUUID(t *testing.T) {
 	require.False(t, createdAgain)
 	require.Equal(t, first.ShardID, second.ShardID)
 	require.Equal(t, "http://shard-a-updated:8080", second.PrimaryURL)
+}
+
+func TestRegisterShardForcesStandbyOnCreate(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	shard, created, err := repo.RegisterShard(ctx, "77777777-7777-7777-7777-777777777777", coordinator.ShardActive, "http://shard-force:8080", nil)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, coordinator.ShardStandby, shard.State)
+}
+
+func TestRegisterShardEndpointCreatesStandbyWithoutStartupState(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	srv := coordinator.NewServer(config.Config{ClusterKey: "test-key"}, reg)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/shards", strings.NewReader(`{
+		"cluster_key":"test-key",
+		"shard_uuid":"88888888-8888-8888-8888-888888888888",
+		"primary_url":"http://shard-8:8080"
+	}`))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp coordinator.RegisterShardResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, coordinator.ShardStandby, resp.Shard.State)
+
+	created, err := repo.GetShard(ctx, resp.Shard.ShardID)
+	require.NoError(t, err)
+	require.NotNil(t, created)
+	require.Equal(t, coordinator.ShardStandby, created.State)
+}
+
+func TestRegisterShardEndpointReregistrationKeepsExistingState(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	statsSrv := newStatsServer(t)
+	defer statsSrv.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	srv := coordinator.NewServer(config.Config{ClusterKey: "test-key"}, reg)
+	uuid := "99999999-9999-9999-9999-999999999999"
+
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/admin/shards", strings.NewReader(`{
+		"cluster_key":"test-key",
+		"shard_uuid":"`+uuid+`",
+		"primary_url":"`+statsSrv.URL+`"
+	}`))
+	rec1 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusCreated, rec1.Code)
+	var first coordinator.RegisterShardResponse
+	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&first))
+	require.Equal(t, coordinator.ShardStandby, first.Shard.State)
+
+	_, err := reg.PatchShardState(ctx, first.Shard.ShardID, coordinator.ShardActive, true)
+	require.NoError(t, err)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/admin/shards", strings.NewReader(`{
+		"cluster_key":"test-key",
+		"shard_uuid":"`+uuid+`",
+		"primary_url":"http://shard-updated:8080"
+	}`))
+	rec2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	var second coordinator.RegisterShardResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&second))
+	require.Equal(t, first.Shard.ShardID, second.Shard.ShardID)
+	require.Equal(t, coordinator.ShardActive, second.Shard.State)
+	require.Equal(t, "http://shard-updated:8080", second.Shard.PrimaryURL)
 }
 
 func TestBootstrapDoesNotOverwriteRuntimeState(t *testing.T) {
@@ -125,6 +205,34 @@ func TestPatchShardStatePromotesStandbyAndSealsPreviousActive(t *testing.T) {
 	afterB, err := repo.GetShard(ctx, b.ShardID)
 	require.NoError(t, err)
 	require.Equal(t, coordinator.ShardActive, afterB.State)
+}
+
+func TestSealAndRotatePromotesStandby(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	activeSrv := newStatsServer(t)
+	defer activeSrv.Close()
+	standbySrv := newStatsServer(t)
+	defer standbySrv.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	active, _, err := repo.RegisterShard(ctx, "12121212-1212-1212-1212-121212121212", coordinator.ShardStandby, activeSrv.URL, nil)
+	require.NoError(t, err)
+	standby, _, err := repo.RegisterShard(ctx, "13131313-1313-1313-1313-131313131313", coordinator.ShardStandby, standbySrv.URL, nil)
+	require.NoError(t, err)
+
+	_, err = reg.PatchShardState(ctx, active.ShardID, coordinator.ShardActive, true)
+	require.NoError(t, err)
+	require.NoError(t, reg.SealAndRotate(ctx))
+
+	afterActive, err := repo.GetShard(ctx, active.ShardID)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardSealed, afterActive.State)
+
+	afterStandby, err := repo.GetShard(ctx, standby.ShardID)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardActive, afterStandby.State)
 }
 
 func TestProxyPostReturns503WhenActiveShardUnavailable(t *testing.T) {

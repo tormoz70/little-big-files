@@ -60,7 +60,7 @@ services:
       SHARD_UUID: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
       SHARD_CLUSTER_KEY: lbf-sharded-cluster-key
       SHARD_ADVERTISE_URL: http://shard-0-primary:8080
-      SHARD_STARTUP_STATE: active
+      SHARD_STARTUP_STATE: standby
       COORDINATOR_URL: http://coordinator:8080
       PG_DSN: postgres://lbf:lbf@shard-0-db:5432/lbf_shard0?sslmode=disable
       DATA_DIR: /data/segments

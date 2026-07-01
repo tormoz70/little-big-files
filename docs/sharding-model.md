@@ -95,6 +95,56 @@ sequenceDiagram
 
 ---
 
+## 4.1. Hot-add нового шарда
+
+```mermaid
+sequenceDiagram
+    participant Admin as Администратор
+    participant Shard as Новый шард
+    participant Coord as Coordinator
+    participant CPG as Coordinator DB
+    participant Active as Текущий active shard
+
+    Admin->>Shard: Подготовить VM и установить софт
+    Admin->>Shard: Настроить CLUSTER_KEY, COORDINATOR_URL, SHARD_UUID, SHARD_ADVERTISE_URL
+    Admin->>Shard: Запустить shard
+    Shard->>Shard: Инициализация storage, DB, HTTP server
+    Shard->>Coord: POST /v1/admin/shards<br/>{shard_uuid, cluster_key, primary_url, startup_state=standby}
+    Coord->>Coord: Проверить cluster_key и shard_uuid
+    Coord->>CPG: Найти shard по shard_uuid
+
+    alt UUID уже зарегистрирован
+        CPG-->>Coord: Existing shard row
+        Coord->>CPG: Обновить URLs и last_seen_at
+        Coord-->>Shard: 200 OK<br/>{shard_id, state}
+    else Новый UUID
+        Coord->>CPG: INSERT shard_registry<br/>state=standby
+        CPG-->>Coord: Назначен shard_id
+        Coord-->>Shard: 201 Created<br/>{shard_id, state=standby}
+    end
+
+    Shard->>Shard: Применить назначенный shard_id
+    Shard-->>Admin: Запущен как standby
+
+    Note over Admin,Shard: Роль администратора завершена после запуска shard
+    Note over Coord,Shard: Hot-add завершен: shard в кластере как standby
+
+    Coord->>Active: Позже, при ротации: POST /v1/internal/seal
+    Active->>Active: Перейти в read-only
+    Active-->>Coord: 200 OK, sealed
+
+    Coord->>Shard: Позже, при ротации: GET /v1/internal/stats
+    Shard-->>Coord: 200 OK, reachable standby
+    Coord->>CPG: Transaction:<br/>old active -> sealed<br/>standby -> active
+    CPG-->>Coord: Commit OK
+
+    Note over Coord,Shard: Новые writes идут на добавленный shard после ротации
+```
+
+Hot-add безопасный путь: администратор подготавливает VM и запускает shard с `CLUSTER_KEY`, `COORDINATOR_URL`, `SHARD_UUID` и `SHARD_ADVERTISE_URL`. Новый shard при старте сам регистрируется в Coordinator и автоматически входит в кластер как `standby`. Coordinator отклоняет startup registration с `startup_state=active`/`sealed`, чтобы исключить обход ротации. Дальше роль администратора заканчивается: при обычной ротации Coordinator сам выберет reachable `standby`, физически sealed текущий `active` и переведет новый shard в `active`.
+
+---
+
 ## 5. Read path (редкий)
 
 ```mermaid

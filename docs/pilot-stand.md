@@ -66,7 +66,7 @@
 | `SHARD_UUID` | стабильный UUID шарда |
 | `SHARD_CLUSTER_KEY` | ключ кластера (тот же, что `CLUSTER_KEY`) |
 | `SHARD_ADVERTISE_URL` | URL, по которому coordinator ходит в shard |
-| `SHARD_STARTUP_STATE` | `active`/`standby` (обычно `standby`) |
+| `SHARD_STARTUP_STATE` | `standby` (coordinator отклоняет `active`/`sealed` при startup registration) |
 | `COORDINATOR_URL` | `http://lbf-coord.internal:8080` |
 | `PG_DSN` | своя shard-N БД |
 | `DATA_DIR` | `/data/segments` |
@@ -127,8 +127,8 @@
 
 Mutating admin операции выполняются с `cluster_key`:
 
-- `POST /v1/admin/shards` — idempotent registration по `shard_uuid`
-- `PATCH /v1/admin/shards/{id}/state` — ручной switch (`standby -> active` только с `confirm=true`)
+- `POST /v1/admin/shards` — idempotent startup registration по `shard_uuid` (hot-add заканчивается состоянием `standby`)
+- `PATCH /v1/admin/shards/{id}/state` — отдельный recovery/failover сценарий (`standby -> active` только с `confirm=true`)
 - `POST /v1/admin/seal-rotate` — manual rotate (требует `cluster_key` в body или `X-Cluster-Key`)
 
 `COORDINATOR_BOOTSTRAP` используется как seed-реестр: после первого создания shard rows coordinator не перезаписывает runtime state (`active/sealed/standby`) при рестарте.

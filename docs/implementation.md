@@ -121,7 +121,7 @@ Coordinator API:
 | `/v1/packages/{global_id}/files/{file_id}` | `GET` | Proxy file read. |
 | `/v1/packages/{global_id}/original` | `GET` | Proxy original read. |
 | `/v1/admin/shards` | `GET` | Список шардов. |
-| `/v1/admin/shards` | `POST` | Startup registration/upsert shard by UUID. Требует `cluster_key` в body. |
+| `/v1/admin/shards` | `POST` | Startup registration/upsert shard by UUID. Принимает только `startup_state=standby` (или пусто). Требует `cluster_key` в body. |
 | `/v1/admin/seal-rotate` | `POST` | Manual seal active + activate standby. Требует `cluster_key` в body или `X-Cluster-Key`. |
 | `/v1/admin/shards/{id}/state` | `PATCH` | Safe manual state transition. Требует `cluster_key` в body. |
 
@@ -730,8 +730,8 @@ PostgreSQL replication в compose/stand описывается как отдел
 
 Mutating admin operations проверяют `cluster_key` в JSON body:
 
-- `POST /v1/admin/shards`;
-- `PATCH /v1/admin/shards/{id}/state`.
+- `POST /v1/admin/shards` (hot-add registration, только `standby`);
+- `PATCH /v1/admin/shards/{id}/state` (отдельный recovery/failover path).
 
 Проверка:
 

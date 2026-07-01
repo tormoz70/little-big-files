@@ -323,21 +323,9 @@ func (r *Repository) RegisterShard(ctx context.Context, shardUUID string, state 
 		return nil, false, err
 	}
 
-	if state == ShardActive {
-		alreadyActive, err := scanShard(tx.QueryRow(ctx, `
-			SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
-			FROM shard_registry
-			WHERE state = 'active'
-			ORDER BY shard_id
-			LIMIT 1
-			FOR UPDATE`))
-		if err != nil {
-			return nil, false, err
-		}
-		if alreadyActive != nil {
-			return nil, false, ErrStateConflict
-		}
-	}
+	// Startup registration is standby-only by contract.
+	// Even if callers pass another state, new rows are forced to standby.
+	state = ShardStandby
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO shard_registry (

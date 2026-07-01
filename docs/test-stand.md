@@ -268,7 +268,7 @@ curl -s -X POST http://localhost:8080/v1/admin/seal-rotate \
 
 После ротации новые POST идут на shard 1; чтение старых пакетов — по global_id с shard_id=0 (sealed, через replica).
 
-### 5.4. Hot-add и ручной state switch через API
+### 5.4. Hot-add через API (автоматический standby)
 
 Регистрация shard (идемпотентно по `shard_uuid`):
 
@@ -278,12 +278,15 @@ curl -s -X POST http://localhost:8080/v1/admin/shards \
   -d '{
     "cluster_key": "lbf-local-cluster-key",
     "shard_uuid": "33333333-3333-3333-3333-333333333333",
-    "primary_url": "http://shard-3-primary:8080",
-    "startup_state": "standby"
+    "primary_url": "http://shard-3-primary:8080"
   }' | jq .
 ```
 
-Ручное переключение standby -> active (с подтверждением):
+Hot-add завершается на `standby`: новый shard появляется в реестре и дальше активируется только обычной ротацией Coordinator (`seal-rotate`) или отдельным recovery/manual failover.
+
+### 5.5. Manual failover: standby -> active
+
+Ручное переключение standby -> active (с подтверждением) используется как recovery-путь:
 
 ```bash
 curl -s -X PATCH http://localhost:8080/v1/admin/shards/3/state \
@@ -295,7 +298,7 @@ curl -s -X PATCH http://localhost:8080/v1/admin/shards/3/state \
   }' | jq .
 ```
 
-### 5.5. Зеркалирование (MVP стенда)
+### 5.6. Зеркалирование (MVP стенда)
 
 | Слой | Механизм на стенде | Prod (TODO) |
 |------|-------------------|-------------|
@@ -362,7 +365,7 @@ curl -s -X POST "http://localhost:8080/v1/packages?supplier_id=1" \
 | `SHARD_UUID` | UUID шарда | обычно не используется на replica |
 | `SHARD_CLUSTER_KEY` | `lbf-...` | общий ключ кластера |
 | `SHARD_ADVERTISE_URL` | URL primary shard | — |
-| `SHARD_STARTUP_STATE` | `active`/`standby` | — |
+| `SHARD_STARTUP_STATE` | `standby` | Startup registration; `active`/`sealed` отклоняются coordinator |
 | `COORDINATOR_URL` | `http://coordinator:8080` | — |
 | `PG_DSN` | shard-N-db | **тот же** (MVP) |
 | `DATA_DIR` | `/data/segments` | отдельный volume |
@@ -577,7 +580,7 @@ docker compose -f deploy/docker-compose.sharded.yml down -v
 | `no active shard` | Пустой shard_registry | Проверить bootstrap JSON, перезапустить coordinator |
 | GET 404 после seal | Replica segments не synced | `docker compose logs shard-0-sync`, проверить volumes |
 | Seal не срабатывает | `total_bytes < SHARD_MAX_BYTES` | Уменьшить `SHARD_MAX_BYTES` или вызвать `POST /v1/admin/seal-rotate` с `cluster_key` |
-| `active_shard_unavailable` (POST 503) | active shard недоступен по сети | Проверить `primary_url`, `GET /v1/internal/stats`, затем выполнить manual switch через `PATCH /v1/admin/shards/{id}/state` |
+| `active_shard_unavailable` (POST 503) | active shard недоступен по сети | Проверить `primary_url`, `GET /v1/internal/stats`, затем выполнить recovery/failover через `PATCH /v1/admin/shards/{id}/state` |
 | Duplicate POST медленный | Dedup memory + PG | Для нагрузки — RocksDB backend |
 | Coordinator не стартует | PG not ready | Дождаться healthcheck coordinator-db |
 

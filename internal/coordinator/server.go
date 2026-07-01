@@ -188,18 +188,10 @@ func (s *Server) registerShard(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "primary_url is required"})
 		return
 	}
-	state := ShardStandby
-	if strings.TrimSpace(req.StartupState) != "" {
-		parsed, err := ParseShardState(req.StartupState)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if parsed == ShardSealed {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "startup_state cannot be sealed"})
-			return
-		}
-		state = parsed
+	state, err := startupRegistrationState(req.StartupState)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 	shard, created, err := s.registry.RegisterShard(r.Context(), req.ShardUUID, state, req.PrimaryURL, req.ReplicaURL)
 	if err != nil {
@@ -218,6 +210,20 @@ func (s *Server) registerShard(w http.ResponseWriter, r *http.Request) {
 		Shard:      *shard,
 		Registered: created,
 	})
+}
+
+func startupRegistrationState(raw string) (ShardState, error) {
+	if strings.TrimSpace(raw) == "" {
+		return ShardStandby, nil
+	}
+	parsed, err := ParseShardState(raw)
+	if err != nil {
+		return "", err
+	}
+	if parsed != ShardStandby {
+		return "", errStr("startup_state must be standby")
+	}
+	return ShardStandby, nil
 }
 
 func (s *Server) patchShardState(w http.ResponseWriter, r *http.Request) {
