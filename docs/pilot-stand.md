@@ -127,13 +127,13 @@
 
 Mutating admin операции выполняются с `cluster_key`:
 
-- `POST /v1/admin/shards` — idempotent startup registration по `shard_uuid` (hot-add заканчивается состоянием `standby`)
+- `POST /v1/admin/shards` — idempotent startup registration по `shard_uuid` (вход всегда `standby`; при отсутствии `active` coordinator может автоматически promote первый reachable `standby`)
 - `PATCH /v1/admin/shards/{id}/state` — отдельный recovery/failover сценарий (`standby -> active` только с `confirm=true`)
 - `POST /v1/admin/seal-rotate` — manual rotate (требует `cluster_key` в body или `X-Cluster-Key`)
 
 `COORDINATOR_BOOTSTRAP` используется как seed-реестр: после первого создания shard rows coordinator не перезаписывает runtime state (`active/sealed/standby`) при рестарте.
 
-При недоступности `active` coordinator работает в режиме fail-closed: `POST /v1/packages` возвращает `503 active_shard_unavailable` до ручного переключения.
+При недоступности `active` coordinator работает в режиме fail-closed: `POST /v1/packages` возвращает `503 active_shard_unavailable` до появления reachable `standby` (или ручного failover).
 
 ---
 

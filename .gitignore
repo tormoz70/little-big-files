@@ -12,3 +12,4 @@ clients/python/logs/
 coverage.out
 tmp-panel*.png
 
+/.idea/

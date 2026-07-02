@@ -69,8 +69,32 @@ func TestRegisterShardEndpointCreatesStandbyWithoutStartupState(t *testing.T) {
 	require.Equal(t, coordinator.ShardStandby, created.State)
 }
 
+func TestRegisterShardEndpointReturnsActiveWhenAutoPromoted(t *testing.T) {
+	_, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	statsSrv := newStatsServer(t)
+	defer statsSrv.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	srv := coordinator.NewServer(config.Config{ClusterKey: "test-key"}, reg)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/shards", strings.NewReader(`{
+		"cluster_key":"test-key",
+		"shard_uuid":"8a8a8a8a-8a8a-8a8a-8a8a-8a8a8a8a8a8a",
+		"primary_url":"`+statsSrv.URL+`"
+	}`))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp coordinator.RegisterShardResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, coordinator.ShardActive, resp.Shard.State)
+}
+
 func TestRegisterShardEndpointReregistrationKeepsExistingState(t *testing.T) {
-	ctx, repo := setupCoordinatorRepo(t)
+	_, repo := setupCoordinatorRepo(t)
 	defer repo.Close()
 
 	statsSrv := newStatsServer(t)
@@ -90,10 +114,7 @@ func TestRegisterShardEndpointReregistrationKeepsExistingState(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec1.Code)
 	var first coordinator.RegisterShardResponse
 	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&first))
-	require.Equal(t, coordinator.ShardStandby, first.Shard.State)
-
-	_, err := reg.PatchShardState(ctx, first.Shard.ShardID, coordinator.ShardActive, true)
-	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardActive, first.Shard.State)
 
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/admin/shards", strings.NewReader(`{
 		"cluster_key":"test-key",
@@ -233,6 +254,88 @@ func TestSealAndRotatePromotesStandby(t *testing.T) {
 	afterStandby, err := repo.GetShard(ctx, standby.ShardID)
 	require.NoError(t, err)
 	require.Equal(t, coordinator.ShardActive, afterStandby.State)
+}
+
+func TestRegisterShardAutoActivatesWhenNoActiveExists(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	statsSrv := newStatsServer(t)
+	defer statsSrv.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	shard, created, err := reg.RegisterShard(ctx, "1a1a1a1a-1a1a-1a1a-1a1a-1a1a1a1a1a1a", coordinator.ShardStandby, statsSrv.URL, nil)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, coordinator.ShardActive, shard.State)
+
+	active, err := repo.ActiveShard(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	require.Equal(t, shard.ShardID, active.ShardID)
+}
+
+func TestRegisterShardSkipsUnreachableStandbyAndActivatesNext(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+
+	first, _, err := reg.RegisterShard(ctx, "2b2b2b2b-2b2b-2b2b-2b2b-2b2b2b2b2b2b", coordinator.ShardStandby, "http://127.0.0.1:1", nil)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardStandby, first.State)
+
+	statsSrv := newStatsServer(t)
+	defer statsSrv.Close()
+	second, _, err := reg.RegisterShard(ctx, "3c3c3c3c-3c3c-3c3c-3c3c-3c3c3c3c3c3c", coordinator.ShardStandby, statsSrv.URL, nil)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardActive, second.State)
+
+	active, err := repo.ActiveShard(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	require.Equal(t, second.ShardID, active.ShardID)
+
+	firstAfter, err := repo.GetShard(ctx, first.ShardID)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardStandby, firstAfter.State)
+}
+
+func TestRegisterShardAutoActivatesAfterAllShardsSealed(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	activeSrv := newStatsServer(t)
+	defer activeSrv.Close()
+	reg := coordinator.NewRegistry(repo, 0, "")
+	first, _, err := reg.RegisterShard(ctx, "4d4d4d4d-4d4d-4d4d-4d4d-4d4d4d4d4d4d", coordinator.ShardStandby, activeSrv.URL, nil)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardActive, first.State)
+
+	sealed, err := reg.PatchShardState(ctx, first.ShardID, coordinator.ShardSealed, false)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardSealed, sealed.State)
+	active, err := repo.ActiveShard(ctx)
+	require.NoError(t, err)
+	require.Nil(t, active)
+
+	nextSrv := newStatsServer(t)
+	defer nextSrv.Close()
+	second, _, err := reg.RegisterShard(ctx, "5e5e5e5e-5e5e-5e5e-5e5e-5e5e5e5e5e5e", coordinator.ShardStandby, nextSrv.URL, nil)
+	require.NoError(t, err)
+	require.Equal(t, coordinator.ShardActive, second.State)
+}
+
+func TestProxyPostReturns503WhenNoActiveAndNoStandby(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	_, status, err := reg.ProxyPost(ctx, 1, []byte("<?xml version=\"1.0\"?><x/>"), "")
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	var statusErr *coordinator.StatusError
+	require.ErrorAs(t, err, &statusErr)
+	require.Equal(t, "active_shard_unavailable", statusErr.Code)
 }
 
 func TestProxyPostReturns503WhenActiveShardUnavailable(t *testing.T) {

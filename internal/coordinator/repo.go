@@ -111,10 +111,36 @@ func (r *Repository) ActiveShard(ctx context.Context) (*ShardInfo, error) {
 }
 
 func (r *Repository) StandbyShard(ctx context.Context) (*ShardInfo, error) {
-	row := r.pool.QueryRow(ctx, `
+	shards, err := r.StandbyShards(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(shards) == 0 {
+		return nil, nil
+	}
+	first := shards[0]
+	return &first, nil
+}
+
+func (r *Repository) StandbyShards(ctx context.Context) ([]ShardInfo, error) {
+	rows, err := r.pool.Query(ctx, `
 		SELECT shard_id, shard_uuid, state, primary_url, replica_url, total_bytes, sealed_at, last_seen_at, last_error, created_at
-		FROM shard_registry WHERE state = 'standby' ORDER BY shard_id LIMIT 1`)
-	return scanShard(row)
+		FROM shard_registry
+		WHERE state = 'standby'
+		ORDER BY shard_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ShardInfo
+	for rows.Next() {
+		s, err := scanShardRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, rows.Err()
 }
 
 func (r *Repository) ListShards(ctx context.Context) ([]ShardInfo, error) {

@@ -282,7 +282,7 @@ curl -s -X POST http://localhost:8080/v1/admin/shards \
   }' | jq .
 ```
 
-Hot-add завершается на `standby`: новый shard появляется в реестре и дальше активируется только обычной ротацией Coordinator (`seal-rotate`) или отдельным recovery/manual failover.
+Hot-add всегда регистрирует shard как `standby`: новый shard появляется в реестре без прямого `startup_state=active`. Если в кластере нет `active`, Coordinator автоматически promotes первый reachable `standby` и восстанавливает прием POST. Иначе shard активируется обычной ротацией (`seal-rotate`) или отдельным recovery/manual failover.
 
 ### 5.5. Manual failover: standby -> active
 
@@ -580,7 +580,7 @@ docker compose -f deploy/docker-compose.sharded.yml down -v
 | `no active shard` | Пустой shard_registry | Проверить bootstrap JSON, перезапустить coordinator |
 | GET 404 после seal | Replica segments не synced | `docker compose logs shard-0-sync`, проверить volumes |
 | Seal не срабатывает | `total_bytes < SHARD_MAX_BYTES` | Уменьшить `SHARD_MAX_BYTES` или вызвать `POST /v1/admin/seal-rotate` с `cluster_key` |
-| `active_shard_unavailable` (POST 503) | active shard недоступен по сети | Проверить `primary_url`, `GET /v1/internal/stats`, затем выполнить recovery/failover через `PATCH /v1/admin/shards/{id}/state` |
+| `active_shard_unavailable` (POST 503) | нет `active` и нет reachable `standby` | Проверить `primary_url`, `GET /v1/internal/stats`; поднять/починить standby (Coordinator auto-activate), при необходимости выполнить recovery/failover через `PATCH /v1/admin/shards/{id}/state` |
 | Duplicate POST медленный | Dedup memory + PG | Для нагрузки — RocksDB backend |
 | Coordinator не стартует | PG not ready | Дождаться healthcheck coordinator-db |
 

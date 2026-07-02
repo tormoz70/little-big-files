@@ -141,7 +141,7 @@ sequenceDiagram
     Note over Coord,Shard: Новые writes идут на добавленный shard после ротации
 ```
 
-Hot-add безопасный путь: администратор подготавливает VM и запускает shard с `CLUSTER_KEY`, `COORDINATOR_URL`, `SHARD_UUID` и `SHARD_ADVERTISE_URL`. Новый shard при старте сам регистрируется в Coordinator и автоматически входит в кластер как `standby`. Coordinator отклоняет startup registration с `startup_state=active`/`sealed`, чтобы исключить обход ротации. Дальше роль администратора заканчивается: при обычной ротации Coordinator сам выберет reachable `standby`, физически sealed текущий `active` и переведет новый shard в `active`.
+Hot-add безопасный путь: администратор подготавливает VM и запускает shard с `CLUSTER_KEY`, `COORDINATOR_URL`, `SHARD_UUID` и `SHARD_ADVERTISE_URL`. Новый shard при старте сам регистрируется в Coordinator и автоматически входит в кластер как `standby`. Coordinator отклоняет startup registration с `startup_state=active`/`sealed`, чтобы исключить обход ротации. Если `active` отсутствует, Coordinator автоматически promotes первый reachable `standby`; иначе новый shard остается `standby` до обычной ротации, где Coordinator sealed текущий `active` и переводит standby в `active`.
 
 ---
 

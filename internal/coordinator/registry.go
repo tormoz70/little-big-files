@@ -83,6 +83,13 @@ func (reg *Registry) RegisterShard(ctx context.Context, shardUUID string, state 
 		_ = reg.repo.MarkShardReachable(ctx, shard.ShardID)
 		metrics.SetCoordinatorShardUp(strconv.Itoa(shard.ShardID), string(shard.State), true)
 	}
+	// Keep startup registration standby-only, but auto-recover write path when active is missing.
+	ensured, ensureErr := reg.EnsureActiveShard(ctx)
+	if ensureErr != nil {
+		slog.Warn("failed to auto-activate standby shard", "err", ensureErr)
+	} else if ensured != nil && shard != nil && ensured.ShardID == shard.ShardID {
+		shard = ensured
+	}
 	return shard, created, nil
 }
 
@@ -247,29 +254,71 @@ func (reg *Registry) sealShardAndPersist(ctx context.Context, shard *ShardInfo, 
 	return total, sealedAt, nil
 }
 
-func (reg *Registry) ActivateStandby(ctx context.Context) (*ShardInfo, error) {
+func (reg *Registry) EnsureActiveShard(ctx context.Context) (*ShardInfo, error) {
 	reg.rotationMu.Lock()
 	defer reg.rotationMu.Unlock()
-	standby, err := reg.repo.StandbyShard(ctx)
+
+	return reg.ensureActiveShardLocked(ctx)
+}
+
+func (reg *Registry) ensureActiveShardLocked(ctx context.Context) (*ShardInfo, error) {
+	active, err := reg.repo.ActiveShard(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if standby == nil {
+	if active != nil {
+		return active, nil
+	}
+
+	standbys, err := reg.repo.StandbyShards(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(standbys) == 0 {
 		return nil, fmt.Errorf("no standby shard available")
 	}
-	if _, err := reg.FetchStats(ctx, standby.PrimaryURL); err != nil {
-		_ = reg.repo.MarkShardUnreachable(ctx, standby.ShardID, err.Error())
-		metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), false)
-		metrics.IncCoordinatorShardFailures(strconv.Itoa(standby.ShardID), "activate")
-		return nil, fmt.Errorf("standby shard %d is unavailable: %w", standby.ShardID, err)
+
+	var lastErr error
+	for _, standby := range standbys {
+		if _, err := reg.FetchStats(ctx, standby.PrimaryURL); err != nil {
+			_ = reg.repo.MarkShardUnreachable(ctx, standby.ShardID, err.Error())
+			metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), false)
+			metrics.IncCoordinatorShardFailures(strconv.Itoa(standby.ShardID), "ensure_active")
+			lastErr = err
+			continue
+		}
+		_ = reg.repo.MarkShardReachable(ctx, standby.ShardID)
+		metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), true)
+
+		updated, err := reg.repo.PromoteStandby(ctx, standby.ShardID, nil)
+		if err != nil {
+			metrics.IncCoordinatorShardFailures(strconv.Itoa(standby.ShardID), "ensure_active_promote")
+			lastErr = err
+			if errors.Is(err, ErrStateConflict) {
+				active, activeErr := reg.repo.ActiveShard(ctx)
+				if activeErr != nil {
+					return nil, activeErr
+				}
+				if active != nil {
+					return active, nil
+				}
+			}
+			continue
+		}
+		_ = reg.repo.MarkShardReachable(ctx, updated.ShardID)
+		metrics.SetCoordinatorShardUp(strconv.Itoa(updated.ShardID), string(updated.State), true)
+		slog.Info("auto-activated standby shard", "shard_id", updated.ShardID)
+		return updated, nil
 	}
-	_ = reg.repo.MarkShardReachable(ctx, standby.ShardID)
-	metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), true)
-	updated, err := reg.repo.PromoteStandby(ctx, standby.ShardID, nil)
-	if err != nil {
-		return nil, err
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("no reachable standby shard available: %w", lastErr)
 	}
-	return updated, nil
+	return nil, fmt.Errorf("no reachable standby shard available")
+}
+
+func (reg *Registry) ActivateStandby(ctx context.Context) (*ShardInfo, error) {
+	return reg.EnsureActiveShard(ctx)
 }
 
 func (reg *Registry) SealAndRotate(ctx context.Context) error {
@@ -327,8 +376,15 @@ func (reg *Registry) sealAndRotateLocked(ctx context.Context) error {
 
 func (reg *Registry) CheckSeal(ctx context.Context) error {
 	active, err := reg.repo.ActiveShard(ctx)
-	if err != nil || active == nil {
+	if err != nil {
 		return err
+	}
+	if active == nil {
+		ensured, err := reg.EnsureActiveShard(ctx)
+		if err != nil || ensured == nil {
+			return nil
+		}
+		active = ensured
 	}
 	st, err := reg.FetchStats(ctx, active.PrimaryURL)
 	if err != nil {
@@ -352,11 +408,24 @@ func (reg *Registry) ProxyPost(ctx context.Context, supplierID int, body []byte,
 	if err != nil {
 		return nil, 0, err
 	}
+	var noActiveCause error
 	if active == nil {
+		ensured, ensureErr := reg.EnsureActiveShard(ctx)
+		if ensureErr != nil {
+			noActiveCause = ensureErr
+		}
+		if ensured != nil {
+			active = ensured
+		}
+	}
+	if active == nil {
+		if noActiveCause == nil {
+			noActiveCause = fmt.Errorf("no active shard")
+		}
 		return nil, http.StatusServiceUnavailable, &StatusError{
 			Status: http.StatusServiceUnavailable,
 			Code:   "active_shard_unavailable",
-			Cause:  fmt.Errorf("no active shard"),
+			Cause:  noActiveCause,
 		}
 	}
 	targetURL, err := url.Parse(active.PrimaryURL + "/v1/packages")

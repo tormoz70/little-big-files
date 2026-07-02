@@ -572,6 +572,8 @@ sequenceDiagram
 
 Важная деталь безопасности: Coordinator-to-shard internal calls передают `X-Cluster-Key`. Без этого shard вернет `401`.
 
+Дополнение по отказоустойчивости write path: если `active` отсутствует, Coordinator пытается автоматически поднять первый reachable `standby` (по порядку `shard_id`) в `active`. Это срабатывает после startup registration shard, в seal loop и перед возвратом `503` на `POST /v1/packages`. Если reachable standby нет, сохраняется fail-closed поведение с `active_shard_unavailable`.
+
 ### 11.4. Coordinator metadata
 
 `shard_registry`:
