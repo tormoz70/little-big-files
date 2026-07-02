@@ -363,6 +363,31 @@ func TestProxyPostReturns503WhenActiveShardUnavailable(t *testing.T) {
 	require.Equal(t, "active_shard_unavailable", statusErr.Code)
 }
 
+func TestCheckSealFailsClosedWhenNoStandby(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	statsSrv := newStatsServerWithTotalBytes(t, 10)
+	defer statsSrv.Close()
+
+	reg := coordinator.NewRegistry(repo, 1, "")
+	shard, _, err := repo.RegisterShard(ctx, "76767676-7676-7676-7676-767676767676", coordinator.ShardStandby, statsSrv.URL, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, reg.CheckSeal(ctx))
+
+	after, err := repo.GetShard(ctx, shard.ShardID)
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	require.Equal(t, coordinator.ShardSealed, after.State)
+
+	_, status, err := reg.ProxyPost(ctx, 1, []byte("<?xml version=\"1.0\"?><x/>"), "")
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	var statusErr *coordinator.StatusError
+	require.ErrorAs(t, err, &statusErr)
+	require.Equal(t, "active_shard_unavailable", statusErr.Code)
+}
+
 func setupCoordinatorRepo(t *testing.T) (context.Context, *coordinator.Repository) {
 	t.Helper()
 	dsn := os.Getenv("COORDINATOR_PG_DSN")
@@ -383,6 +408,10 @@ func setupCoordinatorRepo(t *testing.T) (context.Context, *coordinator.Repositor
 }
 
 func newStatsServer(t *testing.T) *httptest.Server {
+	return newStatsServerWithTotalBytes(t, 0)
+}
+
+func newStatsServerWithTotalBytes(t *testing.T, totalBytes int64) *httptest.Server {
 	t.Helper()
 	sealed := false
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -404,7 +433,7 @@ func newStatsServer(t *testing.T) *httptest.Server {
 			"shard_id":    0,
 			"role":        "primary",
 			"read_only":   sealed,
-			"total_bytes": 0,
+			"total_bytes": totalBytes,
 		})
 	}))
 }

@@ -1,0 +1,8 @@
+services:
+  coordinator:
+    environment:
+      COORDINATOR_BOOTSTRAP: /app/deploy/shards.empty.json
+      SHARD_MAX_BYTES: "1048576"
+      SEAL_CHECK_INTERVAL: 2s
+    volumes:
+      - ../deploy/shards.empty.json:/app/deploy/shards.empty.json:ro

@@ -40,6 +40,7 @@ type StatusError struct {
 }
 
 var ErrRotationIncomplete = errors.New("rotation incomplete")
+var ErrNoStandbyShard = errors.New("no standby shard available")
 
 func (e *StatusError) Error() string {
 	if e.Cause != nil {
@@ -341,7 +342,7 @@ func (reg *Registry) sealAndRotateLocked(ctx context.Context) error {
 		return err
 	}
 	if standby == nil {
-		return fmt.Errorf("no standby shard available")
+		return ErrNoStandbyShard
 	}
 	if _, err := reg.FetchStats(ctx, standby.PrimaryURL); err != nil {
 		_ = reg.repo.MarkShardUnreachable(ctx, standby.ShardID, err.Error())
@@ -397,7 +398,18 @@ func (reg *Registry) CheckSeal(ctx context.Context) error {
 	metrics.SetCoordinatorShardUp(strconv.Itoa(active.ShardID), string(active.State), true)
 	_ = reg.repo.SetShardState(ctx, active.ShardID, ShardActive, st.TotalBytes, nil)
 	if reg.shardMaxBytes > 0 && st.TotalBytes >= reg.shardMaxBytes {
-		return reg.SealAndRotate(ctx)
+		if err := reg.SealAndRotate(ctx); err != nil {
+			// Fail-closed behavior: if there is no standby to rotate into,
+			// seal the current active shard so writes stop with 503 until a new standby appears.
+			if errors.Is(err, ErrNoStandbyShard) {
+				if _, sealErr := reg.PatchShardState(ctx, active.ShardID, ShardSealed, false); sealErr != nil {
+					return sealErr
+				}
+				slog.Warn("sealed active shard without standby; coordinator is fail-closed", "shard_id", active.ShardID)
+				return nil
+			}
+			return err
+		}
 	}
 	return nil
 }
