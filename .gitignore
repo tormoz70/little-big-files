@@ -13,3 +13,4 @@ coverage.out
 tmp-panel*.png
 
 /.idea/
+/deploy/client-logs/

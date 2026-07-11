@@ -1,0 +1,51 @@
+# Hot-add overlay: fourth shard (standby) on the local stand.
+#   docker compose -f deploy/docker-compose.local.yml -f deploy/docker-compose.shard-3-hotadd.yml up -d shard-3-db shard-3-primary
+
+services:
+  shard-3-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: lbf_shard3
+    volumes:
+      - shard3-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d lbf_shard3"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shard-3-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      HTTP_ADDR: ":8080"
+      SHARD_ID: "3"
+      SHARD_ROLE: primary
+      SHARD_UUID: 33333333-3333-3333-3333-333333333333
+      SHARD_CLUSTER_KEY: lbf-local-cluster-key
+      SHARD_ADVERTISE_URL: http://shard-3-primary:8080
+      SHARD_STARTUP_STATE: standby
+      COORDINATOR_URL: http://coordinator:8080
+      PG_DSN: postgres://lbf:lbf@shard-3-db:5432/lbf_shard3?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      DEDUP_BACKEND: memory
+      MIGRATIONS_PATH: /app/migrations
+      EXAMPLES_DIR: /app/examples
+      COMPRESSION_ENABLED: "true"
+      DEDUP_REBUILD_ON_START: "true"
+    volumes:
+      - shard3-segments:/data/segments
+      - shard3-rocksdb:/data/rocksdb
+    depends_on:
+      shard-3-db:
+        condition: service_healthy
+
+volumes:
+  shard3-pg:
+  shard3-segments:
+  shard3-rocksdb:
