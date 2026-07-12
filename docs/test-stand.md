@@ -4,6 +4,46 @@
 
 ---
 
+## 0. Single-node профиль (Coordinator + один shard)
+
+Если нужен один узел без hot-add/standby, используйте профиль [deploy/docker-compose.single-node.yml](../deploy/docker-compose.single-node.yml):
+
+```bash
+make docker-single-node
+```
+
+Особенности:
+
+- coordinator и shard работают в одном compose-стеке;
+- bootstrap содержит только один `active` shard ([deploy/shards.single-node.json](../deploy/shards.single-node.json));
+- авто-ротация отключена (`SHARD_MAX_BYTES=0`);
+- при нехватке места shard возвращает `507 insufficient_storage` на новые `POST /v1/packages` до расширения диска.
+
+### Smoke-check (PowerShell)
+
+```powershell
+make docker-single-node
+
+$xml = '<?xml version="1.0"?><doc/>'
+$create = Invoke-RestMethod -Method Post -Uri "http://localhost:8080/v1/packages?supplier_id=1" -ContentType "application/xml" -Body $xml
+$id = $create.package_id
+Invoke-RestMethod -Method Get -Uri "http://localhost:8080/v1/packages/$id" | Out-Null
+
+# эмуляция low-disk: завышаем порог и перезапускаем shard
+$env:MIN_FREE_DISK_BYTES = "1099511627776"
+docker compose -f deploy/docker-compose.single-node.yml up -d --force-recreate shard-primary
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/v1/packages?supplier_id=1" -ContentType "application/xml" -Body $xml
+# ожидается 507 insufficient_storage
+
+# восстановление: возвращаем порог и перезапускаем shard
+Remove-Item Env:MIN_FREE_DISK_BYTES
+docker compose -f deploy/docker-compose.single-node.yml up -d --force-recreate shard-primary
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/v1/packages?supplier_id=1" -ContentType "application/xml" -Body $xml
+# ожидается 201
+```
+
+---
+
 ## 1. Назначение
 
 Стенд предназначен для:

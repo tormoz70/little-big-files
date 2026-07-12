@@ -262,7 +262,7 @@ func (s *Server) patchShardState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) RunSealLoop(ctx context.Context) {
-	if s.cfg.SealCheckInterval <= 0 || s.cfg.ShardMaxBytes <= 0 {
+	if s.cfg.IsSingleNode() || s.cfg.SealCheckInterval <= 0 || s.cfg.ShardMaxBytes <= 0 {
 		return
 	}
 	ticker := time.NewTicker(s.cfg.SealCheckInterval)

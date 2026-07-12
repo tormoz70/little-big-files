@@ -8,6 +8,7 @@ import (
 )
 
 type Config struct {
+	DeploymentMode       string // single-node | sharded
 	DataDir               string
 	PGDSN                 string
 	SegmentMaxSize        int64
@@ -46,10 +47,24 @@ type Config struct {
 	SealCheckInterval    time.Duration
 	CoordinatorBootstrap string // shard registry bootstrap file or inline
 	ClusterKey           string
+	MinFreeDiskBytes         int64
+	DiskCheckInterval        time.Duration
+	DiskResumeHysteresisBytes int64
 }
 
 func Load() Config {
+	coordinatorURL := env("COORDINATOR_URL", "")
+	deploymentMode := strings.ToLower(strings.TrimSpace(env("DEPLOYMENT_MODE", "")))
+	if deploymentMode == "" {
+		if strings.TrimSpace(coordinatorURL) != "" {
+			deploymentMode = "sharded"
+		} else {
+			deploymentMode = "single-node"
+		}
+	}
+
 	return Config{
+		DeploymentMode:        deploymentMode,
 		DataDir:               env("DATA_DIR", "./data/segments"),
 		PGDSN:                 env("PG_DSN", "postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable"),
 		SegmentMaxSize:        envInt64("SEGMENT_MAX_SIZE", 4*1024*1024*1024),
@@ -80,12 +95,15 @@ func Load() Config {
 		ShardClusterKey:       env("SHARD_CLUSTER_KEY", ""),
 		ShardAdvertiseURL:     env("SHARD_ADVERTISE_URL", ""),
 		ShardStartupState:     env("SHARD_STARTUP_STATE", "standby"),
-		CoordinatorURL:        env("COORDINATOR_URL", ""),
+		CoordinatorURL:        coordinatorURL,
 		CoordinatorPGDSN:      env("COORDINATOR_PG_DSN", "postgres://lbf:lbf@localhost:5433/coordinator?sslmode=disable"),
 		ShardMaxBytes:         envInt64("SHARD_MAX_BYTES", 500*1024*1024*1024),
 		SealCheckInterval:     envDuration("SEAL_CHECK_INTERVAL", 30*time.Second),
 		CoordinatorBootstrap:  env("COORDINATOR_BOOTSTRAP", "./deploy/shards.bootstrap.json"),
 		ClusterKey:            env("CLUSTER_KEY", ""),
+		MinFreeDiskBytes:         envInt64("MIN_FREE_DISK_BYTES", 0),
+		DiskCheckInterval:        envDuration("DISK_CHECK_INTERVAL", 10*time.Second),
+		DiskResumeHysteresisBytes: envInt64("DISK_RESUME_HYSTERESIS_BYTES", 64*1024*1024),
 	}
 }
 
@@ -151,4 +169,8 @@ func (c Config) EffectiveClusterKey() string {
 		return key
 	}
 	return strings.TrimSpace(c.ShardClusterKey)
+}
+
+func (c Config) IsSingleNode() bool {
+	return strings.EqualFold(strings.TrimSpace(c.DeploymentMode), "single-node")
 }

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -124,4 +125,34 @@ func TestSealSetsReadOnly(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec2, req2)
 	require.Equal(t, http.StatusForbidden, rec2.Code)
+}
+
+func TestDiskGateBlocksWritesButKeepsInternalStats(t *testing.T) {
+	repo := testmetadata.NewMemoryRepository()
+	segDir := t.TempDir()
+	segments, err := storage.NewSegmentManager(segDir, 1024*1024)
+	require.NoError(t, err)
+	defer segments.Close()
+
+	cfg := config.Config{ShardID: 0, ShardRole: "primary", MaxBodyBytes: 1024 * 1024, ClusterKey: "secret"}
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
+	ingest := ingestion.NewService(cfg, repo, blobs)
+	srv := api.NewShardServer(cfg, ingest, repo, blobs, segments)
+	srv.ShardGuard().SetWriteBlockReason("disk_full")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/packages?supplier_id=1", bytes.NewReader([]byte(`<?xml version="1.0"?><x/>`)))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInsufficientStorage, rec.Code)
+	require.Contains(t, rec.Body.String(), "insufficient_storage")
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/v1/internal/stats", nil)
+	statsReq.Header.Set("X-Cluster-Key", "secret")
+	statsRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(statsRec, statsReq)
+	require.Equal(t, http.StatusOK, statsRec.Code)
+
+	var stats map[string]any
+	require.NoError(t, json.NewDecoder(statsRec.Body).Decode(&stats))
+	require.Equal(t, "disk_full", stats["write_block_reason"])
 }

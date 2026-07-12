@@ -15,6 +15,7 @@ import (
 	"github.com/little-big-files/little-big-files/internal/config"
 	"github.com/little-big-files/little-big-files/internal/coordinator"
 	"github.com/little-big-files/little-big-files/internal/dedup"
+	"github.com/little-big-files/little-big-files/internal/diskspace"
 	"github.com/little-big-files/little-big-files/internal/ingestion"
 	"github.com/little-big-files/little-big-files/internal/metadata"
 	"github.com/little-big-files/little-big-files/internal/metrics"
@@ -25,7 +26,8 @@ import (
 func main() {
 	cfg := config.Load()
 	cfg.ClusterKey = cfg.EffectiveClusterKey()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	if cfg.ShardRole != "replica" {
 		if err := metadata.RunMigrations(ctx, cfg.PGDSN, cfg.MigrationsPath); err != nil {
@@ -140,6 +142,7 @@ func main() {
 			blobStats = repo
 		}
 		metrics.RunShardRefresh(ctx, guard, segments, blobStats, 10*time.Second)
+		runDiskWriteGate(ctx, cfg, guard)
 	}
 
 	httpSrv := &http.Server{
@@ -160,10 +163,58 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+	cancel()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+func runDiskWriteGate(ctx context.Context, cfg config.Config, guard *api.ShardGuard) {
+	if guard == nil || cfg.MinFreeDiskBytes <= 0 || cfg.DiskCheckInterval <= 0 {
+		return
+	}
+	if cfg.ShardRole != "primary" {
+		return
+	}
+
+	paths := []string{cfg.DataDir, cfg.RocksDBPath}
+	resumeThreshold := cfg.MinFreeDiskBytes + cfg.DiskResumeHysteresisBytes
+
+	evaluate := func() {
+		free, err := diskspace.MinAvailableBytes(paths)
+		if err != nil {
+			slog.Warn("disk free check failed", "err", err)
+			return
+		}
+
+		if free < cfg.MinFreeDiskBytes {
+			if guard.WriteBlockReason() != "disk_full" {
+				slog.Warn("writes disabled due to low free disk", "free_bytes", free, "min_free_bytes", cfg.MinFreeDiskBytes)
+			}
+			guard.SetWriteBlockReason("disk_full")
+			return
+		}
+
+		if guard.WriteBlockReason() == "disk_full" && free >= resumeThreshold {
+			guard.SetWriteBlockReason("")
+			slog.Info("writes re-enabled after free disk recovered", "free_bytes", free, "resume_threshold", resumeThreshold)
+		}
+	}
+
+	evaluate()
+	ticker := time.NewTicker(cfg.DiskCheckInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				evaluate()
+			}
+		}
+	}()
 }
 
 func startupRegistrationRequest(cfg config.Config) coordinator.RegisterShardRequest {

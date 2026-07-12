@@ -472,6 +472,15 @@ func (reg *Registry) ProxyPost(ctx context.Context, supplierID int, body []byte,
 		return nil, 0, err
 	}
 	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			_ = reg.repo.MarkShardReachable(ctx, active.ShardID)
+			metrics.SetCoordinatorShardUp(strconv.Itoa(active.ShardID), string(active.State), true)
+			return nil, http.StatusInsufficientStorage, &StatusError{
+				Status: http.StatusInsufficientStorage,
+				Code:   "insufficient_storage",
+				Cause:  errors.New("active shard reported insufficient storage"),
+			}
+		}
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= http.StatusInternalServerError {
 			msg := fmt.Sprintf("active shard returned status %d", resp.StatusCode)
 			_ = reg.repo.MarkShardUnreachable(ctx, active.ShardID, msg)

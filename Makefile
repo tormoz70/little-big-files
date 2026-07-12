@@ -39,6 +39,9 @@ docker-up:
 docker-sharded:
 	docker compose -f deploy/docker-compose.sharded.yml up -d --build
 
+docker-single-node:
+	docker compose -f deploy/docker-compose.single-node.yml up -d --build
+
 docker-sharded-replica:
 	docker compose -f deploy/docker-compose.sharded.yml -f deploy/docker-compose.sharded.replica.yml --profile replica up -d --build
 

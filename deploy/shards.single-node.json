@@ -1,0 +1,8 @@
+[
+  {
+    "shard_id": 0,
+    "state": "active",
+    "primary_url": "http://shard-primary:8080",
+    "shard_uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  }
+]

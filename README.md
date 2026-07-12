@@ -36,9 +36,51 @@ Environment:
 | `EXAMPLES_DIR` | `./examples` — ZIP samples for dictionary training |
 | `DEDUP_BACKEND` | `memory` — `memory`, `postgres` (PG-only), `rocksdb` (needs `-tags rocksdb`) |
 | `ROCKSDB_PATH` | `./data/rocksdb` |
+| `DEPLOYMENT_MODE` | auto (`single-node` when `COORDINATOR_URL` is empty, otherwise `sharded`) |
+| `MIN_FREE_DISK_BYTES` | `0` — disable disk-space write gate (set >0 to block writes on low disk) |
+| `DISK_CHECK_INTERVAL` | `10s` — disk-space polling interval for write gate |
+| `DISK_RESUME_HYSTERESIS_BYTES` | `67108864` (64 MB) — threshold buffer before writes auto-resume |
 | `BLOOM_EXPECTED_ITEMS` | `1000000` |
 | `BLOOM_FALSE_POSITIVE` | `0.001` |
 | `DEDUP_REBUILD_ON_START` | `true` — reload Bloom+index from `content_blobs` |
+
+## Single-node with Coordinator
+
+Use this profile when coordinator and storage run on one host and scaling/standby is not expected:
+
+```bash
+make docker-single-node
+```
+
+Behavior in this mode:
+
+- clients still write/read through coordinator (`:8080`) and get global package IDs;
+- shard registry has exactly one active shard and no standby rotation;
+- low disk on shard (`free < MIN_FREE_DISK_BYTES`) returns `507 insufficient_storage` for new uploads;
+- writes resume automatically after disk expansion when free space crosses `MIN_FREE_DISK_BYTES + DISK_RESUME_HYSTERESIS_BYTES`.
+
+### Single-node smoke check
+
+PowerShell quick check (normal write/read -> forced `507` -> recovery):
+
+```powershell
+make docker-single-node
+
+$body = '<?xml version="1.0"?><doc/>'
+$create = Invoke-RestMethod -Method Post -Uri "http://localhost:8080/v1/packages?supplier_id=1" -ContentType "application/xml" -Body $body
+$id = $create.package_id
+Invoke-RestMethod -Method Get -Uri "http://localhost:8080/v1/packages/$id" | Out-Null
+
+$env:MIN_FREE_DISK_BYTES = "1099511627776"
+docker compose -f deploy/docker-compose.single-node.yml up -d --force-recreate shard-primary
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/v1/packages?supplier_id=1" -ContentType "application/xml" -Body $body
+# expected: HTTP 507 + {"error":"insufficient_storage"}
+
+Remove-Item Env:MIN_FREE_DISK_BYTES
+docker compose -f deploy/docker-compose.single-node.yml up -d --force-recreate shard-primary
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/v1/packages?supplier_id=1" -ContentType "application/xml" -Body $body
+# expected: HTTP 201
+```
 
 ## Phase 4: sharded test stand
 

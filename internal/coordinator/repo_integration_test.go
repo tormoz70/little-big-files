@@ -5,6 +5,7 @@ package coordinator_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -363,6 +364,28 @@ func TestProxyPostReturns503WhenActiveShardUnavailable(t *testing.T) {
 	require.Equal(t, "active_shard_unavailable", statusErr.Code)
 }
 
+func TestProxyPostReturns507WhenActiveShardIsDiskFull(t *testing.T) {
+	ctx, repo := setupCoordinatorRepo(t)
+	defer repo.Close()
+
+	shardSrv := newPackageServer(t, http.StatusInsufficientStorage, map[string]any{
+		"error": "insufficient_storage",
+	})
+	defer shardSrv.Close()
+
+	reg := coordinator.NewRegistry(repo, 0, "")
+	shard, _, err := repo.RegisterShard(ctx, "68686868-6868-6868-6868-686868686868", coordinator.ShardStandby, shardSrv.URL, nil)
+	require.NoError(t, err)
+	_, err = reg.PatchShardState(ctx, shard.ShardID, coordinator.ShardActive, true)
+	require.NoError(t, err)
+
+	_, status, err := reg.ProxyPost(ctx, 1, []byte("<?xml version=\"1.0\"?><x/>"), "")
+	require.Equal(t, http.StatusInsufficientStorage, status)
+	var statusErr *coordinator.StatusError
+	require.ErrorAs(t, err, &statusErr)
+	require.Equal(t, "insufficient_storage", statusErr.Code)
+}
+
 func TestCheckSealFailsClosedWhenNoStandby(t *testing.T) {
 	ctx, repo := setupCoordinatorRepo(t)
 	defer repo.Close()
@@ -435,5 +458,33 @@ func newStatsServerWithTotalBytes(t *testing.T, totalBytes int64) *httptest.Serv
 			"read_only":   sealed,
 			"total_bytes": totalBytes,
 		})
+	}))
+}
+
+func newPackageServer(t *testing.T, status int, body map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/internal/stats":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"shard_id":    0,
+				"role":        "primary",
+				"read_only":   false,
+				"total_bytes": 0,
+			})
+			return
+		case "/v1/packages":
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(body)
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 	}))
 }

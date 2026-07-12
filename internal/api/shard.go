@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/little-big-files/little-big-files/internal/storage"
@@ -19,16 +20,40 @@ import (
 type ShardGuard struct {
 	ShardID  int
 	Role     string
-	readOnly bool
 	segments *storage.SegmentManager
+
+	mu               sync.RWMutex
+	readOnly         bool
+	writeBlockReason string
 }
 
 func NewShardGuard(shardID int, role string, readOnly bool, segments *storage.SegmentManager) *ShardGuard {
 	return &ShardGuard{ShardID: shardID, Role: role, readOnly: readOnly, segments: segments}
 }
 
-func (g *ShardGuard) SetReadOnly(v bool) { g.readOnly = v }
-func (g *ShardGuard) ReadOnly() bool     { return g.readOnly }
+func (g *ShardGuard) SetReadOnly(v bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.readOnly = v
+}
+
+func (g *ShardGuard) ReadOnly() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.readOnly
+}
+
+func (g *ShardGuard) SetWriteBlockReason(reason string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.writeBlockReason = strings.TrimSpace(reason)
+}
+
+func (g *ShardGuard) WriteBlockReason() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.writeBlockReason
+}
 
 func (g *ShardGuard) MetricsShardID() int { return g.ShardID }
 func (g *ShardGuard) MetricsRole() string { return g.Role }
@@ -37,10 +62,13 @@ func (g *ShardGuard) writeAllowed() bool {
 	if g == nil {
 		return true
 	}
-	if g.readOnly {
+	if g.ReadOnly() {
 		return false
 	}
 	if strings.EqualFold(g.Role, "replica") {
+		return false
+	}
+	if g.WriteBlockReason() != "" {
 		return false
 	}
 	return true
@@ -49,6 +77,10 @@ func (g *ShardGuard) writeAllowed() bool {
 func (g *ShardGuard) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/packages") && !g.writeAllowed() {
+			if strings.EqualFold(g.WriteBlockReason(), "disk_full") {
+				writeJSON(w, http.StatusInsufficientStorage, errorResponse{Error: "insufficient_storage"})
+				return
+			}
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "shard is read-only"})
 			return
 		}
@@ -57,10 +89,11 @@ func (g *ShardGuard) middleware(next http.Handler) http.Handler {
 }
 
 type shardStatsResponse struct {
-	ShardID    int    `json:"shard_id"`
-	Role       string `json:"role"`
-	ReadOnly   bool   `json:"read_only"`
-	TotalBytes int64  `json:"total_bytes"`
+	ShardID          int    `json:"shard_id"`
+	Role             string `json:"role"`
+	ReadOnly         bool   `json:"read_only"`
+	WriteBlockReason string `json:"write_block_reason,omitempty"`
+	TotalBytes       int64  `json:"total_bytes"`
 }
 
 type segmentFileInfo struct {
@@ -120,10 +153,11 @@ func (s *Server) mountInternal(r chi.Router, guard *ShardGuard) {
 			return
 		}
 		writeJSON(w, http.StatusOK, shardStatsResponse{
-			ShardID:    guard.ShardID,
-			Role:       guard.Role,
-			ReadOnly:   guard.ReadOnly(),
-			TotalBytes: total,
+			ShardID:          guard.ShardID,
+			Role:             guard.Role,
+			ReadOnly:         guard.ReadOnly(),
+			WriteBlockReason: guard.WriteBlockReason(),
+			TotalBytes:       total,
 		})
 	}))
 

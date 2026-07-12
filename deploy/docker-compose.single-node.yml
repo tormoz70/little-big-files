@@ -1,0 +1,89 @@
+services:
+  coordinator-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: coordinator
+    volumes:
+      - coordinator-pg-single:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d coordinator"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shard-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lbf
+      POSTGRES_PASSWORD: lbf
+      POSTGRES_DB: lbf
+    volumes:
+      - shard-pg-single:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lbf -d lbf"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shard-primary:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    environment:
+      HTTP_ADDR: ":8080"
+      DEPLOYMENT_MODE: single-node
+      SHARD_ID: "0"
+      SHARD_ROLE: primary
+      SHARD_UUID: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+      SHARD_CLUSTER_KEY: lbf-single-node-key
+      SHARD_ADVERTISE_URL: http://shard-primary:8080
+      SHARD_STARTUP_STATE: standby
+      COORDINATOR_URL: http://coordinator:8080
+      PG_DSN: postgres://lbf:lbf@shard-db:5432/lbf?sslmode=disable
+      DATA_DIR: /data/segments
+      ROCKSDB_PATH: /data/rocksdb
+      MIGRATIONS_PATH: /app/migrations
+      EXAMPLES_DIR: /app/examples
+      MIN_FREE_DISK_BYTES: "${MIN_FREE_DISK_BYTES:-536870912}"
+      DISK_CHECK_INTERVAL: "${DISK_CHECK_INTERVAL:-10s}"
+      DISK_RESUME_HYSTERESIS_BYTES: "${DISK_RESUME_HYSTERESIS_BYTES:-67108864}"
+    volumes:
+      - shard-segments-single:/data/segments
+      - shard-rocksdb-single:/data/rocksdb
+    depends_on:
+      shard-db:
+        condition: service_healthy
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: coordinator
+    ports:
+      - "8080:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      DEPLOYMENT_MODE: single-node
+      COORDINATOR_PG_DSN: postgres://lbf:lbf@coordinator-db:5432/coordinator?sslmode=disable
+      COORDINATOR_BOOTSTRAP: /app/deploy/shards.single-node.json
+      COORDINATOR_MIGRATIONS_PATH: /app/migrations/coordinator
+      CLUSTER_KEY: lbf-single-node-key
+      SHARD_MAX_BYTES: "0"
+      SEAL_CHECK_INTERVAL: 0s
+      MAX_BODY_BYTES: "67108864"
+    depends_on:
+      coordinator-db:
+        condition: service_healthy
+      shard-primary:
+        condition: service_started
+    volumes:
+      - ../deploy/shards.single-node.json:/app/deploy/shards.single-node.json:ro
+
+volumes:
+  coordinator-pg-single:
+  shard-pg-single:
+  shard-segments-single:
+  shard-rocksdb-single:
