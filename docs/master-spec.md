@@ -8,7 +8,11 @@
 | **Стек** | Go 1.22+, PostgreSQL 14+, HTTP REST |
 | **Лицензия** | MIT |
 
-Этот документ — **единая точка правды** по продукту: зачем система существует, какие инварианты обязательны, что входит в контракт API/данных, а что намеренно вне scope. Детали реализации, стендов и trade-offs вынесены в связанные документы (§17).
+Этот документ — **человекочитаемый product contract**: зачем система существует, какие инварианты обязательны, что входит в контракт API/данных, а что намеренно вне scope.
+
+Для Cursor/агентов авторитетный SoT — [`.ai/master-spec.yaml`](../.ai/master-spec.yaml) (persona, guardrails, code anchors, verification); краткий pointer — [`.cursor/rules/master-spec.mdc`](../.cursor/rules/master-spec.mdc). Оба артефакта должны оставаться согласованы при смене контракта.
+
+Детали реализации, стендов и trade-offs вынесены в связанные документы (§17).
 
 ---
 
@@ -449,6 +453,8 @@ IF active.total_bytes >= SHARD_MAX_BYTES AND standby reachable:
 
 | Документ | Роль |
 |----------|------|
+| [../.ai/master-spec.yaml](../.ai/master-spec.yaml) | **Agent SoT**: persona, guardrails, anchors, verification |
+| [../.cursor/rules/master-spec.mdc](../.cursor/rules/master-spec.mdc) | Always-on Cursor pointer + hard-rules summary |
 | [architecture.md](architecture.md) | Концепция, trade-offs, исторические алгоритмы |
 | [implementation.md](implementation.md) | As-built: последовательности, storage, FT, security |
 | [sharding-model.md](sharding-model.md) | Volume seal, hot-add, mirroring |
@@ -475,4 +481,4 @@ IF active.total_bytes >= SHARD_MAX_BYTES AND standby reachable:
 
 ---
 
-**Владелец изменений:** изменения API, инвариантов (§6) или acceptance (§14) требуют обновления этого master-spec в том же PR/коммите, что и код.
+**Владелец изменений:** изменения API, инвариантов (§6) или acceptance (§14) требуют обновления **`.ai/master-spec.yaml`** и этого `docs/master-spec.md` в том же PR/коммите, что и код (плюс сводку в `.cursor/rules/master-spec.mdc`, если меняются hard rules).

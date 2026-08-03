@@ -1,0 +1,40 @@
+---
+description: Домен little-big-files, guardrails и контекст из master-spec
+alwaysApply: true
+---
+
+# Master spec (little-big-files)
+
+Авторитетный источник доменной модели и ограничений для агента: `.ai/master-spec.yaml`.
+
+Перед **изменением API**, **ingestion/dedup/storage**, **coordinator seal/rotate** или **ZIP/recovery** — прочитай этот файл (или `@.ai/master-spec.yaml` в чате).
+
+## Разделение с другим контекстом
+
+| Файл | Назначение |
+|------|------------|
+| `.ai/master-spec.yaml` | домен, инварианты, guardrails для агента |
+| `docs/master-spec.md` | human product contract (FR/NFR/API/acceptance) |
+| `docs/implementation.md` | as-built sequences, FT, security |
+| `docs/sharding-model.md` | volume seal, hot-add, mirroring |
+| `docs/test-stand.md` | стенд и операционные сценарии |
+
+## Ключевые ограничения (сводка)
+
+- Transparent dedup: успешный POST всегда `201` + новый `package_id`; клиент не видит dedup internals.
+- Hash: `package_hash` = SHA-256(body), `content_hash` = SHA-256(logical bytes); XXH3 не используется.
+- Append-only segments; orphans допустимы; нет online delete/GC как контракт.
+- Single active writer; hot-add только `standby`; sealed/replica — no public write.
+- ZIP: streaming members + `MAX_UNPACKED_ZIP_BYTES`; skip `..` / dirs; не распаковывать на FS.
+- Body limit → `413`; disk gate → `507`; CRC32C verify on read по умолчанию.
+- Internal/admin mutating ops — `CLUSTER_KEY`; без ключа internal disabled.
+- Нет публичного XML-hash lookup (`global_xml_index` stub).
+- Изменение API/инвариантов — обновить `.ai/master-spec.yaml` и `docs/master-spec.md`.
+
+## Верификация
+
+`make test` / integration; smoke из `docs/test-stand.md`; сценарии из `verification.key_scenarios` в master-spec.
+
+## Поддержка актуальности
+
+При изменении бизнес-логики обновляй `.ai/master-spec.yaml` и эту сводку, если меняются hard rules.
