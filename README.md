@@ -39,7 +39,7 @@ flowchart LR
 
 Write path: clients → **Coordinator** → active shard primary. When a shard exceeds its volume limit it is sealed; reads from sealed shards prefer **replica_url** when configured, otherwise the sealed primary serves reads.
 
-Details: [architecture.md](docs/architecture.md) · [sharding-model.md](docs/sharding-model.md) · [implementation.md](docs/implementation.md)
+Details: [master-spec.md](docs/master-spec.md) · [architecture.md](docs/architecture.md) · [sharding-model.md](docs/sharding-model.md) · [implementation.md](docs/implementation.md)
 
 ## Quick start
 
@@ -136,9 +136,10 @@ PG_DSN=postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable make test-integrati
 
 ## Documentation
 
+- [master-spec.md](docs/master-spec.md) — **product contract**: goals, FR/NFR, invariants, API, acceptance
 - [test-stand.md](docs/test-stand.md) — deployment, scenarios, seal, troubleshooting
 - [pilot-stand.md](docs/pilot-stand.md) — pilot VM operations
-- [implementation.md](docs/implementation.md) — architecture, storage, fault tolerance, security
+- [implementation.md](docs/implementation.md) — as-built architecture, storage, fault tolerance, security
 - [architecture.md](docs/architecture.md) — design rationale and data flow
 - [stack.md](docs/stack.md) — technology choices
 - [sharding-model.md](docs/sharding-model.md) — volume sharding model
