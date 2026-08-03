@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/little-big-files/little-big-files/internal/api"
@@ -31,11 +32,23 @@ func setupHandlerEnv(t *testing.T) *handlerEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = segments.Close() })
 
-	cfg := config.Config{MaxBodyBytes: 16 * 1024 * 1024, ZipThresholdSize: 102400, ZipThresholdCount: 100}
+	cfg := config.Config{MaxBodyBytes: 16 * 1024 * 1024, ZipThresholdSize: 102400, ZipThresholdCount: 100, DedupBackend: "memory"}
 	blobs := storage.NewBlobStore(segments, nil, nil, nil)
 	ingest := ingestion.NewService(cfg, repo, blobs)
 	srv := api.NewServer(cfg, ingest, repo, blobs)
 	return &handlerEnv{server: srv, repo: repo}
+}
+
+func makeOversizeZip(t *testing.T, payloadBytes int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	f, err := w.Create("big.xml")
+	require.NoError(t, err)
+	_, err = f.Write(bytes.Repeat([]byte("x"), payloadBytes))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	return buf.Bytes()
 }
 
 func makeZip(t *testing.T, files map[string][]byte) []byte {
@@ -54,11 +67,11 @@ func makeZip(t *testing.T, files map[string][]byte) []byte {
 
 func postPackage(t *testing.T, env *handlerEnv, supplierID int, body []byte, filename string) map[string]any {
 	t.Helper()
-	url := "/v1/packages?supplier_id=" + itoa(supplierID)
+	reqURL := "/v1/packages?supplier_id=" + itoa(supplierID)
 	if filename != "" {
-		url += "&filename=" + filename
+		reqURL += "&filename=" + url.QueryEscape(filename)
 	}
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, reqURL, bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	env.server.Router().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -190,4 +203,28 @@ func TestGETPackageMetadata(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Equal(t, float64(107), got["supplier_id"])
 	require.Equal(t, "single", got["storage_mode"])
+}
+
+func TestDownloadSanitizesContentDisposition(t *testing.T) {
+	env := setupHandlerEnv(t)
+	body := []byte(`<?xml version="1.0"?><x/>`)
+	malicious := "evil\"name\r\nX-Injected: yes.xml"
+	resp := postPackage(t, env, 1, body, malicious)
+	files := resp["files"].([]any)
+	var fileID int64
+	for _, f := range files {
+		m := f.(map[string]any)
+		if m["role"] == "original" {
+			fileID = int64(m["file_id"].(float64))
+		}
+	}
+	pkgID := int64(resp["package_id"].(float64))
+	req := httptest.NewRequest(http.MethodGet, "/v1/packages/"+itoa64(pkgID)+"/files/"+itoa64(fileID), nil)
+	rec := httptest.NewRecorder()
+	env.server.Router().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	cd := rec.Header().Get("Content-Disposition")
+	require.NotContains(t, cd, "\r\n")
+	require.NotContains(t, cd, "\n")
+	require.Contains(t, cd, "attachment")
 }

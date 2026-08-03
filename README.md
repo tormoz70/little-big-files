@@ -96,7 +96,8 @@ Key environment variables (full list in [implementation.md](docs/implementation.
 | `PG_DSN` | `postgres://lbf:lbf@localhost:5432/lbf?sslmode=disable` | Shard metadata database |
 | `DATA_DIR` | `./data/segments` | Segment files on disk |
 | `HTTP_ADDR` | `:8080` | Listen address |
-| `DEDUP_BACKEND` | `memory` | `memory`, `postgres`, or `rocksdb` (build tag) |
+| `DEDUP_BACKEND` | `postgres` | `postgres`, `memory` (tests/dev), or `rocksdb` (Docker `server-rocksdb` image) |
+| `MAX_UNPACKED_ZIP_BYTES` | `512MiB` | Max total uncompressed ZIP member bytes per unpack |
 | `DEPLOYMENT_MODE` | auto | `single-node` or `sharded` |
 | `COORDINATOR_URL` | unset | Enables shard auto-registration |
 | `CLUSTER_KEY` | unset | Shared secret for admin/internal endpoints |

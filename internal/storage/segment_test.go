@@ -111,3 +111,33 @@ func TestSegmentReadRecordMagic(t *testing.T) {
 	require.Equal(t, storage.MagicZIP, magic)
 	require.Equal(t, payload, data)
 }
+
+func TestSegmentReopenTruncatesCorruptTail(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+
+	payload := []byte("recover-me")
+	record := storage.EncodeRecord(storage.MagicXML, payload)
+	loc, err := sm.Append(context.Background(), record)
+	require.NoError(t, err)
+	require.NoError(t, sm.Close())
+
+	files, _ := os.ReadDir(dir)
+	path := filepath.Join(dir, files[0].Name())
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(raw, []byte("partial-tail")...), 0o644))
+
+	sm2, err := storage.NewSegmentManager(dir, 1024*1024)
+	require.NoError(t, err)
+	defer sm2.Close()
+
+	data, err := sm2.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, payload, data)
+
+	rawAfter, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, len(raw), len(rawAfter))
+}

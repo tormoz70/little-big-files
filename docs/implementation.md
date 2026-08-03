@@ -658,7 +658,7 @@ sequenceDiagram
 
 Решение:
 
-- при `NewSegmentManager.recover()` читается активный segment;
+- при `NewSegmentManager.recover()` активный segment сканируется последовательно через `scanValidTail` без загрузки всего файла в RAM; битый хвост усекается через `Truncate`.
 - `truncateToValid` сканирует records до первой невалидной записи;
 - record валиден только если magic known, payload полностью прочитан, CRC32C совпадает;
 - хвост отрезается.
@@ -671,7 +671,7 @@ sequenceDiagram
 2. загружает compression dictionary sidecar;
 3. читает `segment_*.idx`;
 4. восстанавливает `content_blobs`;
-5. читает `ingest_journal.ndjson`;
+5. читает `ingest_journal.ndjson` (`ReadJournal` игнорирует обрезанную последнюю строку при crash);
 6. восстанавливает `packages` и `package_files`;
 7. пересчитывает `ref_count`;
 8. сбрасывает sequences.
@@ -702,11 +702,12 @@ PostgreSQL replication в compose/stand описывается как отдел
 
 - директории пропускаются;
 - ZIP member name с `..` пропускается;
-- файлы не распаковываются на filesystem, bytes читаются в память и сохраняются как blob.
+- файлы не распаковываются на filesystem; members читаются по одному и сохраняются как blob.
 
 Ограничение:
 
-- нет отдельного лимита total uncompressed ZIP bytes на member-level, кроме общего `MAX_BODY_BYTES` для исходного ZIP и threshold routing. Для production стоит добавить лимит распакованного объема/ratio.
+- `MAX_UNPACKED_ZIP_BYTES` (дефолт 512MiB) на суммарный uncompressed объём members;
+- распаковка потоковая: один member в RAM, сразу запись в BlobStore.
 
 ### 13.3. Internal endpoint auth
 
@@ -793,6 +794,7 @@ Middleware `metrics.Middleware` измеряет HTTP requests/latency.
 | `DATA_DIR` | `./data/segments` | Segment/index/journal directory. |
 | `HTTP_ADDR` | `:8080` | HTTP listen address. |
 | `MAX_BODY_BYTES` | `64MB` | Max upload body. |
+| `MAX_UNPACKED_ZIP_BYTES` | `512MB` | Max total uncompressed ZIP member bytes. |
 | `ZIP_THRESHOLD_SIZE` | `102400` | Large ZIP threshold by input size. |
 | `ZIP_THRESHOLD_COUNT` | `100` | Large ZIP threshold by entry count. |
 | `LARGE_ZIP_ASYNC_UNPACK` | `true` | Enable background unpack. |
@@ -804,7 +806,7 @@ Middleware `metrics.Middleware` измеряет HTTP requests/latency.
 | `VERIFY_CHECKSUM` | `true` | Verify CRC32C on read. |
 | `COMPRESSION_ENABLED` | `true` | Zstd compression for XML. |
 | `COMPRESSION_MIN_SIZE` | `64` | Minimum XML size to compress. |
-| `DEDUP_BACKEND` | `memory` | `memory`, `postgres`, `rocksdb`. |
+| `DEDUP_BACKEND` | `postgres` | `postgres`, `memory` (unit tests), `rocksdb` (compose `server-rocksdb`). |
 | `BLOOM_EXPECTED_ITEMS` | `1000000` | Bloom sizing. |
 | `BLOOM_FALSE_POSITIVE` | `0.001` | Bloom FP target. |
 | `DEDUP_REBUILD_ON_START` | `true` | Rebuild hot index from PG. |
@@ -820,8 +822,8 @@ Middleware `metrics.Middleware` измеряет HTTP requests/latency.
 
 1. `global_xml_index` и lookup по XML hash пока вне scope MVP (реализован только routing по global package id).
 2. Coordinator currently does not send cluster key on public shard proxy requests; this is fine because public `/v1/packages` on shards remains unauthenticated inside the trusted cluster. If shards are exposed outside the private network, add service-to-service auth.
-3. Нет лимита total uncompressed ZIP size/ratio; стоит добавить защиту от zip bombs.
-4. `DEDUP_BACKEND=memory` подходит для stand/dev; production должен использовать persistent backend (`rocksdb`) и реалистичный Bloom sizing.
+3. ~~Нет лимита total uncompressed ZIP size/ratio~~ — закрыто: `MAX_UNPACKED_ZIP_BYTES` + streaming unpack.
+4. ~~`DEDUP_BACKEND=memory` по умолчанию~~ — дефолт `postgres`; compose-стенды используют `server-rocksdb`.
 5. Старые segment files без CRC32C trailer несовместимы с новым форматом. Для pre-production это приемлемо; для production migration нужен compatibility reader.
 6. Segment orphan bytes не чистятся (append-only design). Для production можно добавить offline compaction, если wasted space станет значимым.
 7. Filename в `Content-Disposition` стоит дополнительно sanitize/escape.

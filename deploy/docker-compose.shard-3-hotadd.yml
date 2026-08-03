@@ -20,7 +20,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
+      target: server-rocksdb
     environment:
       HTTP_ADDR: ":8080"
       SHARD_ID: "3"
@@ -33,7 +33,6 @@ services:
       PG_DSN: postgres://lbf:lbf@shard-3-db:5432/lbf_shard3?sslmode=disable
       DATA_DIR: /data/segments
       ROCKSDB_PATH: /data/rocksdb
-      DEDUP_BACKEND: memory
       MIGRATIONS_PATH: /app/migrations
       EXAMPLES_DIR: /app/examples
       COMPRESSION_ENABLED: "true"

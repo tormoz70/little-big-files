@@ -94,14 +94,21 @@ func (q *UnpackQueue) worker(ctx context.Context, id int) {
 		case <-ctx.Done():
 			return
 		case pkgID := <-q.ch:
-			if err := q.svc.UnpackLargePackage(ctx, pkgID); err != nil {
-				slog.Error("async large zip unpack failed", "package_id", pkgID, "err", err)
-			} else {
-				slog.Info("async large zip unpack done", "package_id", pkgID)
-			}
-			q.mu.Lock()
-			delete(q.inflight, pkgID)
-			q.mu.Unlock()
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("unpack worker panic", "package_id", pkgID, "worker", id, "panic", r)
+					}
+					q.mu.Lock()
+					delete(q.inflight, pkgID)
+					q.mu.Unlock()
+				}()
+				if err := q.svc.UnpackLargePackage(ctx, pkgID); err != nil {
+					slog.Error("async large zip unpack failed", "package_id", pkgID, "err", err)
+				} else {
+					slog.Info("async large zip unpack done", "package_id", pkgID)
+				}
+			}()
 		}
 	}
 }

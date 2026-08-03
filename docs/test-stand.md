@@ -203,7 +203,7 @@ flowchart TB
 
 С профилем `replica` добавляются `shard-*-replica` и `shard-*-sync` (итого 10 сервисов).
 
-Каждый шард — **изолированный** PostgreSQL и отдельные volumes для сегментов/RocksDB (на стенде dedup backend = `memory`).
+Каждый шард — **изолированный** PostgreSQL и отдельные volumes для сегментов/RocksDB (на стенде dedup backend = `rocksdb`, образ `server-rocksdb`).
 
 ---
 
@@ -270,7 +270,7 @@ sequenceDiagram
 
 - `package_id` в ответе клиенту — **глобальный** (64 bit).
 - `file_id` остаётся **локальным** внутри шарда; в URL download Coordinator подставляет global package_id + local file_id.
-- Dedup (Bloom + memory index) работает **только внутри active шарда** между всеми supplier_id.
+- Dedup (Bloom + RocksDB index) работает **только внутри active шарда** между всеми supplier_id.
 
 ### 5.2. Read (GET)
 
@@ -409,7 +409,7 @@ curl -s -X POST "http://localhost:8080/v1/packages?supplier_id=1" \
 | `COORDINATOR_URL` | `http://coordinator:8080` | — |
 | `PG_DSN` | shard-N-db | **тот же** (MVP) |
 | `DATA_DIR` | `/data/segments` | отдельный volume |
-| `DEDUP_BACKEND` | `memory` | `memory` |
+| `DEDUP_BACKEND` | `rocksdb` | из образа `server-rocksdb` |
 | `COMPRESSION_ENABLED` | `true` | `true` |
 | `WRITE_BUFFER_MAX_BYTES` | 4 MB (default) | — |
 | `LARGE_ZIP_ASYNC_UNPACK` | `true` (default) | отключён на replica* |

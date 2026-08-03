@@ -12,50 +12,57 @@ import (
 
 var errSkipLargeUnpack = errors.New("large zip package already unpacked")
 
-// persistZipMembers adds member or unpack_error rows after original already exists.
-func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, supplierID int, members []ZipMember, unpackErr error, counters *ingestCounters) (fileCount int, unpackErrText *string, err error) {
-	if unpackErr != nil {
-		msg := unpackErr.Error()
-		unpackErrText = &msg
-		errBytes := []byte(msg)
-		errHash, created, err := blobs.StoreOrRef(ctx, tx, errBytes, storage.RecordError, supplierID)
-		if err != nil {
-			return 0, nil, err
-		}
-		if counters != nil {
-			counters.add(created)
-		}
-		errName := unpackErrorFilename
-		if _, err := tx.CreatePackageFile(ctx, packageID, metadata.CreateFileInput{
-			BlobHash:         errHash,
-			Role:             RoleUnpackError,
-			OriginalFilename: &errName,
-		}); err != nil {
-			return 0, nil, err
-		}
-		return 2, unpackErrText, nil
+func persistUnpackError(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, supplierID int, unpackErr error, counters *ingestCounters) error {
+	msg := unpackErr.Error()
+	errBytes := []byte(msg)
+	errHash, created, err := blobs.StoreOrRef(ctx, tx, errBytes, storage.RecordError, supplierID)
+	if err != nil {
+		return err
 	}
+	if counters != nil {
+		counters.add(created)
+	}
+	errName := unpackErrorFilename
+	_, err = tx.CreatePackageFile(ctx, packageID, metadata.CreateFileInput{
+		BlobHash:         errHash,
+		Role:             RoleUnpackError,
+		OriginalFilename: &errName,
+	})
+	return err
+}
 
-	for i, m := range members {
-		memberHash, created, err := blobs.StoreOrRef(ctx, tx, m.Data, storage.RecordXML, supplierID)
+// persistZipMembers adds member or unpack_error rows after original already exists.
+func persistZipMembers(ctx context.Context, tx metadata.Tx, blobs *storage.BlobStore, packageID int64, supplierID int, zipBytes []byte, maxUnpacked int64, counters *ingestCounters) (fileCount int, unpackErrText *string, err error) {
+	memberCount := 0
+	unpackErr := ForEachZipMember(zipBytes, maxUnpacked, func(name string, data []byte) error {
+		memberHash, created, err := blobs.StoreOrRef(ctx, tx, data, storage.RecordXML, supplierID)
 		if err != nil {
-			return 0, nil, err
+			return err
 		}
 		if counters != nil {
 			counters.add(created)
 		}
-		seq := i
-		name := m.Filename
+		seq := memberCount
+		memberCount++
 		if _, err := tx.CreatePackageFile(ctx, packageID, metadata.CreateFileInput{
 			BlobHash:         memberHash,
 			Role:             RoleMember,
 			OriginalFilename: &name,
 			SequenceNumber:   &seq,
 		}); err != nil {
+			return err
+		}
+		return nil
+	})
+	if unpackErr != nil {
+		msg := unpackErr.Error()
+		unpackErrText = &msg
+		if err := persistUnpackError(ctx, tx, blobs, packageID, supplierID, unpackErr, counters); err != nil {
 			return 0, nil, err
 		}
+		return 2, unpackErrText, nil
 	}
-	return 1 + len(members), nil, nil
+	return 1 + memberCount, nil, nil
 }
 
 // PendingLargePackageIDs returns packages still in raw_large state, used by the
@@ -66,6 +73,9 @@ func (s *Service) PendingLargePackageIDs(ctx context.Context) ([]int64, error) {
 
 // UnpackLargePackage unpacks a raw_large package in place and propagates members to early clones.
 func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error {
+	if s.unpackTestHook != nil {
+		s.unpackTestHook(packageID)
+	}
 	pkg, err := s.repo.GetPackage(ctx, packageID)
 	if err != nil {
 		return err
@@ -105,8 +115,6 @@ func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error
 		return err
 	}
 
-	members, unpackErr := UnpackZip(zipBytes)
-
 	var fileCount int
 	var unpackErrText *string
 	err = s.repo.WithTx(ctx, func(tx metadata.Tx) error {
@@ -120,7 +128,7 @@ func (s *Service) UnpackLargePackage(ctx context.Context, packageID int64) error
 		if lockedPkg.StorageMode != StorageRawLarge {
 			return errSkipLargeUnpack
 		}
-		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, lockedPkg.SupplierID, members, unpackErr, nil)
+		fc, uet, err := persistZipMembers(ctx, tx, s.blobs, packageID, lockedPkg.SupplierID, zipBytes, s.cfg.MaxUnpackedZipBytes, nil)
 		if err != nil {
 			return err
 		}

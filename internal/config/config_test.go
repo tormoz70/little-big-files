@@ -15,7 +15,8 @@ func TestLoadDefaults(t *testing.T) {
 	require.Equal(t, "single-node", cfg.DeploymentMode)
 	require.Equal(t, "./data/segments", cfg.DataDir)
 	require.Equal(t, int64(64*1024*1024), cfg.MaxBodyBytes)
-	require.Equal(t, "memory", cfg.DedupBackend)
+	require.Equal(t, "postgres", cfg.DedupBackend)
+	require.Equal(t, int64(512*1024*1024), cfg.MaxUnpackedZipBytes)
 	require.True(t, cfg.CompressionEnabled)
 	require.True(t, cfg.DedupRebuildOnStart)
 	require.Equal(t, int64(0), cfg.MinFreeDiskBytes)
@@ -102,7 +103,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"DATA_DIR", "PG_DSN", "SEGMENT_MAX_SIZE", "ZIP_THRESHOLD_SIZE", "ZIP_THRESHOLD_COUNT",
-		"MAX_BODY_BYTES", "HTTP_ADDR", "MIGRATIONS_PATH", "LARGE_ZIP_ASYNC_UNPACK",
+		"MAX_BODY_BYTES", "MAX_UNPACKED_ZIP_BYTES", "HTTP_ADDR", "MIGRATIONS_PATH", "LARGE_ZIP_ASYNC_UNPACK",
 		"UNPACK_WORKERS", "UNPACK_QUEUE_SIZE", "WRITE_BUFFER_MAX_BYTES", "WRITE_BUFFER_INTERVAL",
 		"COMPRESSION_ENABLED", "COMPRESSION_MIN_SIZE", "EXAMPLES_DIR", "DEDUP_BACKEND",
 		"ROCKSDB_PATH", "BLOOM_EXPECTED_ITEMS", "BLOOM_FALSE_POSITIVE", "DEDUP_REBUILD_ON_START",

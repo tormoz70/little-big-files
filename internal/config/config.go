@@ -15,6 +15,7 @@ type Config struct {
 	ZipThresholdSize      int
 	ZipThresholdCount     int
 	MaxBodyBytes          int64
+	MaxUnpackedZipBytes   int64
 	HTTPAddr              string
 	MigrationsPath        string
 	LargeZipAsyncUnpack   bool
@@ -71,6 +72,7 @@ func Load() Config {
 		ZipThresholdSize:      envInt("ZIP_THRESHOLD_SIZE", 102400),
 		ZipThresholdCount:     envInt("ZIP_THRESHOLD_COUNT", 100),
 		MaxBodyBytes:          envInt64("MAX_BODY_BYTES", 64*1024*1024),
+		MaxUnpackedZipBytes:   envInt64("MAX_UNPACKED_ZIP_BYTES", 512*1024*1024),
 		HTTPAddr:              env("HTTP_ADDR", ":8080"),
 		MigrationsPath:        env("MIGRATIONS_PATH", "./migrations"),
 		LargeZipAsyncUnpack:   envBool("LARGE_ZIP_ASYNC_UNPACK", true),
@@ -83,7 +85,7 @@ func Load() Config {
 		CompressionEnabled:    envBool("COMPRESSION_ENABLED", true),
 		CompressionMinSize:    envInt("COMPRESSION_MIN_SIZE", 64),
 		ExamplesDir:           env("EXAMPLES_DIR", "./examples"),
-		DedupBackend:          env("DEDUP_BACKEND", "memory"),
+		DedupBackend:          env("DEDUP_BACKEND", "postgres"),
 		RocksDBPath:           env("ROCKSDB_PATH", "./data/rocksdb"),
 		BloomExpectedItems:    uint(envInt("BLOOM_EXPECTED_ITEMS", 1_000_000)),
 		BloomFalsePositive:    envFloat("BLOOM_FALSE_POSITIVE", 0.001),

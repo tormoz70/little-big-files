@@ -55,6 +55,59 @@ func TestLargeZipAsyncUnpack(t *testing.T) {
 	require.GreaterOrEqual(t, len(pkg.Files), 2)
 }
 
+func TestLargeZipAsyncUnpackOversizeLimit(t *testing.T) {
+	repo := testmetadata.NewMemoryRepository()
+	segDir := t.TempDir()
+	segments, err := storage.NewSegmentManager(segDir, 64*1024*1024)
+	require.NoError(t, err)
+	defer segments.Close()
+
+	cfg := config.Config{
+		MaxBodyBytes:          16 * 1024 * 1024,
+		MaxUnpackedZipBytes:   512,
+		ZipThresholdSize:      100,
+		ZipThresholdCount:     100,
+		LargeZipAsyncUnpack:   true,
+	}
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
+	svc := ingestion.NewService(cfg, repo, blobs)
+	q := ingestion.NewUnpackQueue(svc, 1, 8)
+	svc.SetUnpackQueue(q)
+	defer q.Shutdown()
+
+	zipBody := makeOversizeTestZip(t, 1024)
+	ctx := context.Background()
+	pkg, err := svc.ProcessPackage(ctx, 1, zipBody, strPtr("big.zip"))
+	require.NoError(t, err)
+	require.Equal(t, ingestion.StorageRawLarge, pkg.StorageMode)
+	q.Enqueue(pkg.ID)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		pkg, err = repo.GetPackage(ctx, pkg.ID)
+		require.NoError(t, err)
+		if pkg.StorageMode == ingestion.StorageZipWithMembers {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.Equal(t, ingestion.StorageZipWithMembers, pkg.StorageMode)
+	require.NotNil(t, pkg.UnpackError)
+	require.Contains(t, *pkg.UnpackError, "unpacked size exceeds")
+}
+
+func makeOversizeTestZip(t *testing.T, payloadBytes int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	f, err := w.Create("big.xml")
+	require.NoError(t, err)
+	_, err = f.Write(bytes.Repeat([]byte("x"), payloadBytes))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	return buf.Bytes()
+}
+
 func makeTestZip(t *testing.T, xml []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer

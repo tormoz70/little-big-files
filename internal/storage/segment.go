@@ -151,27 +151,67 @@ func (sm *SegmentManager) openSegmentFile(id int) error {
 		sm.recordCount = 0
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	validSize, rc, err := scanValidTail(f, info.Size())
 	if err != nil {
 		_ = f.Close()
 		return err
 	}
-	truncated, rc, off := truncateToValid(data)
-	if int64(len(truncated)) < info.Size() {
-		if err := os.WriteFile(path, truncated, 0o644); err != nil {
+	if validSize < info.Size() {
+		if err := f.Truncate(validSize); err != nil {
 			_ = f.Close()
 			return err
 		}
-		_ = f.Close()
-		f, err = os.OpenFile(path, os.O_RDWR, 0o644)
-		if err != nil {
-			return err
-		}
-		sm.activeFile = f
 	}
-	sm.activeOffset = off
+	sm.activeOffset = validSize
 	sm.recordCount = rc
 	return nil
+}
+
+func scanValidTail(f *os.File, size int64) (validSize int64, count uint32, err error) {
+	var offset int64
+	hdr := make([]byte, HeaderSize)
+	crcBuf := make([]byte, ChecksumSize)
+
+	for {
+		if size-offset < int64(HeaderSize) {
+			break
+		}
+		if _, err := f.ReadAt(hdr, offset); err != nil {
+			return 0, 0, err
+		}
+		magic, payloadSize, err := DecodeRecordHeader(hdr)
+		if err != nil || payloadSize == 0 || !KnownMagic(magic) {
+			break
+		}
+		recordEnd := offset + int64(HeaderSize) + int64(payloadSize) + int64(ChecksumSize)
+		if recordEnd > size {
+			break
+		}
+		payload := make([]byte, payloadSize)
+		if _, err := f.ReadAt(payload, offset+int64(HeaderSize)); err != nil {
+			return 0, 0, err
+		}
+		if _, err := f.ReadAt(crcBuf, offset+int64(HeaderSize)+int64(payloadSize)); err != nil {
+			return 0, 0, err
+		}
+		storedCRC := binary.LittleEndian.Uint32(crcBuf)
+		if RecordChecksum(payload) != storedCRC {
+			break
+		}
+		count++
+		offset = recordEnd
+	}
+
+	if size-offset >= int64(FooterSize) {
+		footer := make([]byte, FooterSize)
+		if _, err := f.ReadAt(footer, offset); err != nil {
+			return 0, 0, err
+		}
+		if binary.LittleEndian.Uint32(footer[28:32]) == FooterMagic {
+			offset += int64(FooterSize)
+		}
+	}
+	return offset, count, nil
 }
 
 func (sm *SegmentManager) Append(ctx context.Context, record []byte) (Location, error) {

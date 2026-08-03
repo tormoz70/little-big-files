@@ -27,11 +27,12 @@ const (
 )
 
 type Service struct {
-	cfg         config.Config
-	repo        metadata.Repository
-	blobs       *storage.BlobStore
-	journal     *recovery.Journal
-	unpackQueue *UnpackQueue
+	cfg            config.Config
+	repo           metadata.Repository
+	blobs          *storage.BlobStore
+	journal        *recovery.Journal
+	unpackQueue    *UnpackQueue
+	unpackTestHook func(int64)
 }
 
 func NewService(cfg config.Config, repo metadata.Repository, blobs *storage.BlobStore) *Service {
@@ -44,6 +45,11 @@ func (s *Service) SetUnpackQueue(q *UnpackQueue) {
 
 func (s *Service) SetJournal(j *recovery.Journal) {
 	s.journal = j
+}
+
+// SetUnpackTestHook is for tests only.
+func (s *Service) SetUnpackTestHook(fn func(int64)) {
+	s.unpackTestHook = fn
 }
 
 func (s *Service) journalPackage(pkg *metadata.Package) error {
@@ -242,15 +248,19 @@ func (s *Service) ingestLargeZIP(ctx context.Context, supplierID int, pkgHash, b
 }
 
 func (s *Service) ingestSmallZIP(ctx context.Context, supplierID int, pkgHash, body []byte, filename *string) (*metadata.Package, error) {
-	members, unpackErr := UnpackZip(body)
+	memberCount, countErr := CountZipEntries(body)
+	var unpackErr error
+	if countErr != nil {
+		unpackErr = countErr
+	} else {
+		unpackErr = CheckZipUncompressedLimit(body, s.cfg.MaxUnpackedZipBytes)
+	}
 	var unpackErrText *string
-	fileCount := 1
+	fileCount := 1 + memberCount
 	if unpackErr != nil {
 		msg := unpackErr.Error()
 		unpackErrText = &msg
 		fileCount = 2
-	} else {
-		fileCount = 1 + len(members)
 	}
 
 	var packageID int64
@@ -284,7 +294,10 @@ func (s *Service) ingestSmallZIP(ctx context.Context, supplierID int, pkgHash, b
 			return err
 		}
 
-		_, _, err = persistZipMembers(ctx, tx, s.blobs, packageID, supplierID, members, unpackErr, &counters)
+		if unpackErr != nil {
+			return persistUnpackError(ctx, tx, s.blobs, packageID, supplierID, unpackErr, &counters)
+		}
+		_, _, err = persistZipMembers(ctx, tx, s.blobs, packageID, supplierID, body, s.cfg.MaxUnpackedZipBytes, &counters)
 		return err
 	})
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -103,7 +104,11 @@ func ReadJournal(path string) ([]JournalEntry, error) {
 		}
 		var e JournalEntry
 		if err := json.Unmarshal(line, &e); err != nil {
-			return nil, fmt.Errorf("parse journal line: %w", err)
+			if sc.Scan() {
+				return nil, fmt.Errorf("parse journal line: %w", err)
+			}
+			slog.Warn("ignoring partial journal entry at EOF", "err", err)
+			break
 		}
 		out = append(out, e)
 	}

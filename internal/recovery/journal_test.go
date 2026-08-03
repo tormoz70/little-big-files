@@ -2,6 +2,8 @@ package recovery_test
 
 import (
 	"encoding/hex"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +12,42 @@ import (
 	"github.com/little-big-files/little-big-files/internal/recovery"
 	"github.com/stretchr/testify/require"
 )
+
+func sampleJournalEntry(id int64) recovery.JournalEntry {
+	name := "ekb_2447_20250102.zip"
+	return recovery.JournalEntry{
+		Version:     1,
+		PackageID:   id,
+		SupplierID:  1577,
+		ReceivedAt:  recovery.FormatTimeUTC(time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)),
+		PackageHash: hex.EncodeToString([]byte("package-hash-bytes-32-chars-long!!")),
+		PayloadType: "zip",
+		StorageMode: "zip_with_members",
+		FileCount:   2,
+		Files: []recovery.FileRef{
+			{FileID: 1, BlobHash: hex.EncodeToString([]byte("blob-a-32-bytes-long-padding!!")), Role: "original", OriginalFilename: &name},
+		},
+	}
+}
+
+func writeJournalLines(t *testing.T, dir string, lines ...string) string {
+	t.Helper()
+	path := filepath.Join(dir, recovery.JournalFile)
+	var data []byte
+	for _, line := range lines {
+		data = append(data, []byte(line)...)
+		data = append(data, '\n')
+	}
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+	return path
+}
+
+func marshalJournalLine(t *testing.T, e recovery.JournalEntry) string {
+	t.Helper()
+	b, err := json.Marshal(e)
+	require.NoError(t, err)
+	return string(b)
+}
 
 func TestJournalAppendReadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -64,4 +102,38 @@ func TestEntryFromPackage(t *testing.T) {
 	require.Equal(t, hex.EncodeToString(hash), e.PackageHash)
 	require.Len(t, e.Files, 1)
 	require.Equal(t, int64(99), e.Files[0].FileID)
+}
+
+func TestReadJournalIgnoresTruncatedTail(t *testing.T) {
+	dir := t.TempDir()
+	line1 := marshalJournalLine(t, sampleJournalEntry(1))
+	line2 := marshalJournalLine(t, sampleJournalEntry(2))
+	path := filepath.Join(dir, recovery.JournalFile)
+	require.NoError(t, os.WriteFile(path, []byte(line1+"\n"+line2[:len(line2)/2]), 0o644))
+
+	loaded, err := recovery.ReadJournal(path)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	require.Equal(t, int64(1), loaded[0].PackageID)
+}
+
+func TestReadJournalMidFileCorruptionFails(t *testing.T) {
+	dir := t.TempDir()
+	line1 := marshalJournalLine(t, sampleJournalEntry(1))
+	line3 := marshalJournalLine(t, sampleJournalEntry(3))
+	path := writeJournalLines(t, dir, line1, "{not-json", line3)
+
+	_, err := recovery.ReadJournal(path)
+	require.Error(t, err)
+}
+
+func TestReadJournalSkipsEmptyLines(t *testing.T) {
+	dir := t.TempDir()
+	line1 := marshalJournalLine(t, sampleJournalEntry(10))
+	line2 := marshalJournalLine(t, sampleJournalEntry(11))
+	path := writeJournalLines(t, dir, line1, "", line2)
+
+	loaded, err := recovery.ReadJournal(path)
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
 }

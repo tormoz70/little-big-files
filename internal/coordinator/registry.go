@@ -51,6 +51,15 @@ func (e *StatusError) Error() string {
 
 func (e *StatusError) Unwrap() error { return e.Cause }
 
+const controlPlaneHTTPTimeout = 10 * time.Second
+
+func (reg *Registry) controlPlaneContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, controlPlaneHTTPTimeout)
+}
+
 func NewRegistry(repo *Repository, shardMaxBytes int64, clusterKey string) *Registry {
 	return &Registry{
 		repo:          repo,
@@ -95,64 +104,121 @@ func (reg *Registry) RegisterShard(ctx context.Context, shardUUID string, state 
 }
 
 func (reg *Registry) PatchShardState(ctx context.Context, shardID int, nextState ShardState, confirm bool) (*ShardInfo, error) {
-	reg.rotationMu.Lock()
-	defer reg.rotationMu.Unlock()
-
-	target, err := reg.repo.GetShard(ctx, shardID)
-	if err != nil {
-		return nil, err
-	}
-	if target == nil {
-		return nil, ErrShardNotFound
-	}
-
 	switch nextState {
 	case ShardSealed:
-		if target.State != ShardActive {
-			return nil, ErrStateConflict
-		}
-		if _, _, err := reg.sealShardAndPersist(ctx, target, "manual_seal"); err != nil {
-			return nil, err
-		}
-		updated, err := reg.repo.GetShard(ctx, shardID)
+		reg.rotationMu.Lock()
+		target, err := reg.repo.GetShard(ctx, shardID)
 		if err != nil {
+			reg.rotationMu.Unlock()
 			return nil, err
 		}
-		if updated == nil {
+		if target == nil {
+			reg.rotationMu.Unlock()
 			return nil, ErrShardNotFound
 		}
-		return updated, nil
-	case ShardActive:
-		if target.State != ShardStandby || !confirm {
+		if target.State != ShardActive {
+			reg.rotationMu.Unlock()
 			return nil, ErrStateConflict
 		}
-		if _, err := reg.FetchStats(ctx, target.PrimaryURL); err != nil {
-			_ = reg.repo.MarkShardUnreachable(ctx, target.ShardID, err.Error())
-			metrics.SetCoordinatorShardUp(strconv.Itoa(target.ShardID), string(target.State), false)
-			metrics.IncCoordinatorShardFailures(strconv.Itoa(target.ShardID), "manual_promote")
-			return nil, fmt.Errorf("%w: target standby shard is unavailable", ErrStateConflict)
-		}
-		_ = reg.repo.MarkShardReachable(ctx, target.ShardID)
-		metrics.SetCoordinatorShardUp(strconv.Itoa(target.ShardID), string(target.State), true)
+		shardCopy := *target
+		reg.rotationMu.Unlock()
 
-		var sealed *SealedShardTransition
+		httpCtx, cancel := reg.controlPlaneContext(ctx)
+		total, sealedAt, err := reg.sealShardRemote(httpCtx, &shardCopy, "manual_seal")
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+
+		reg.rotationMu.Lock()
+		defer reg.rotationMu.Unlock()
+		current, err := reg.repo.GetShard(ctx, shardID)
+		if err != nil {
+			return nil, err
+		}
+		if current == nil {
+			return nil, ErrShardNotFound
+		}
+		if current.State != ShardActive {
+			return nil, ErrStateConflict
+		}
+		if err := reg.repo.SetShardState(ctx, shardID, ShardSealed, total, &sealedAt); err != nil {
+			metrics.IncCoordinatorShardFailures(strconv.Itoa(shardID), "manual_seal_persist")
+			return nil, err
+		}
+		metrics.SetCoordinatorShardUp(strconv.Itoa(shardID), string(ShardSealed), true)
+		return reg.repo.GetShard(ctx, shardID)
+	case ShardActive:
+		reg.rotationMu.Lock()
+		target, err := reg.repo.GetShard(ctx, shardID)
+		if err != nil {
+			reg.rotationMu.Unlock()
+			return nil, err
+		}
+		if target == nil {
+			reg.rotationMu.Unlock()
+			return nil, ErrShardNotFound
+		}
+		if target.State != ShardStandby || !confirm {
+			reg.rotationMu.Unlock()
+			return nil, ErrStateConflict
+		}
+		targetCopy := *target
+		var activeCopy *ShardInfo
 		active, err := reg.repo.ActiveShard(ctx)
 		if err != nil {
+			reg.rotationMu.Unlock()
 			return nil, err
 		}
 		if active != nil && active.ShardID != target.ShardID {
-			total, sealedAt, err := reg.sealShardRemote(ctx, active, "manual_promote")
+			ac := *active
+			activeCopy = &ac
+		}
+		reg.rotationMu.Unlock()
+
+		httpCtx, cancel := reg.controlPlaneContext(ctx)
+		_, fetchErr := reg.FetchStats(httpCtx, targetCopy.PrimaryURL)
+		cancel()
+		if fetchErr != nil {
+			reg.rotationMu.Lock()
+			_ = reg.repo.MarkShardUnreachable(ctx, targetCopy.ShardID, fetchErr.Error())
+			metrics.SetCoordinatorShardUp(strconv.Itoa(targetCopy.ShardID), string(targetCopy.State), false)
+			metrics.IncCoordinatorShardFailures(strconv.Itoa(targetCopy.ShardID), "manual_promote")
+			reg.rotationMu.Unlock()
+			return nil, fmt.Errorf("%w: target standby shard is unavailable", ErrStateConflict)
+		}
+
+		var sealed *SealedShardTransition
+		if activeCopy != nil {
+			httpCtx, cancel := reg.controlPlaneContext(ctx)
+			total, sealedAt, err := reg.sealShardRemote(httpCtx, activeCopy, "manual_promote")
+			cancel()
 			if err != nil {
 				return nil, err
 			}
 			sealed = &SealedShardTransition{
-				ShardID:    active.ShardID,
+				ShardID:    activeCopy.ShardID,
 				TotalBytes: total,
 				SealedAt:   sealedAt,
 			}
 		}
 
-		updated, err := reg.repo.PromoteStandby(ctx, target.ShardID, sealed)
+		reg.rotationMu.Lock()
+		defer reg.rotationMu.Unlock()
+		current, err := reg.repo.GetShard(ctx, shardID)
+		if err != nil {
+			return nil, err
+		}
+		if current == nil {
+			return nil, ErrShardNotFound
+		}
+		if current.State != ShardStandby {
+			return nil, ErrStateConflict
+		}
+		_ = reg.repo.MarkShardReachable(ctx, targetCopy.ShardID)
+		metrics.SetCoordinatorShardUp(strconv.Itoa(targetCopy.ShardID), string(targetCopy.State), true)
+
+		updated, err := reg.repo.PromoteStandby(ctx, targetCopy.ShardID, sealed)
 		if err != nil {
 			if sealed != nil {
 				metrics.IncCoordinatorShardFailures(strconv.Itoa(sealed.ShardID), "manual_promote_commit")
@@ -203,10 +269,20 @@ func (reg *Registry) FetchStats(ctx context.Context, baseURL string) (*shardStat
 }
 
 func (reg *Registry) SealShard(ctx context.Context, shard *ShardInfo) error {
+	httpCtx, cancel := reg.controlPlaneContext(ctx)
+	total, sealedAt, err := reg.sealShardRemote(httpCtx, shard, "seal")
+	cancel()
+	if err != nil {
+		return err
+	}
 	reg.rotationMu.Lock()
 	defer reg.rotationMu.Unlock()
-	_, _, err := reg.sealShardAndPersist(ctx, shard, "seal")
-	return err
+	if err := reg.repo.SetShardState(ctx, shard.ShardID, ShardSealed, total, &sealedAt); err != nil {
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(shard.ShardID), "seal_persist")
+		return err
+	}
+	metrics.SetCoordinatorShardUp(strconv.Itoa(shard.ShardID), string(ShardSealed), true)
+	return nil
 }
 
 func (reg *Registry) sealShardRemote(ctx context.Context, shard *ShardInfo, op string) (int64, time.Time, error) {
@@ -232,7 +308,9 @@ func (reg *Registry) sealShardRemote(ctx context.Context, shard *ShardInfo, op s
 		return 0, time.Time{}, errors.New(msg)
 	}
 	now := time.Now().UTC()
-	st, _ := reg.FetchStats(ctx, shard.PrimaryURL)
+	httpCtx, cancel := reg.controlPlaneContext(ctx)
+	st, _ := reg.FetchStats(httpCtx, shard.PrimaryURL)
+	cancel()
 	var total int64
 	if st != nil {
 		total = st.TotalBytes
@@ -242,36 +320,19 @@ func (reg *Registry) sealShardRemote(ctx context.Context, shard *ShardInfo, op s
 	return total, now, nil
 }
 
-func (reg *Registry) sealShardAndPersist(ctx context.Context, shard *ShardInfo, op string) (int64, time.Time, error) {
-	total, sealedAt, err := reg.sealShardRemote(ctx, shard, op)
-	if err != nil {
-		return 0, time.Time{}, err
-	}
-	if err := reg.repo.SetShardState(ctx, shard.ShardID, ShardSealed, total, &sealedAt); err != nil {
-		metrics.IncCoordinatorShardFailures(strconv.Itoa(shard.ShardID), op+"_persist")
-		return 0, time.Time{}, err
-	}
-	metrics.SetCoordinatorShardUp(strconv.Itoa(shard.ShardID), string(ShardSealed), true)
-	return total, sealedAt, nil
-}
-
 func (reg *Registry) EnsureActiveShard(ctx context.Context) (*ShardInfo, error) {
 	reg.rotationMu.Lock()
-	defer reg.rotationMu.Unlock()
-
-	return reg.ensureActiveShardLocked(ctx)
-}
-
-func (reg *Registry) ensureActiveShardLocked(ctx context.Context) (*ShardInfo, error) {
 	active, err := reg.repo.ActiveShard(ctx)
 	if err != nil {
+		reg.rotationMu.Unlock()
 		return nil, err
 	}
 	if active != nil {
+		reg.rotationMu.Unlock()
 		return active, nil
 	}
-
 	standbys, err := reg.repo.StandbyShards(ctx)
+	reg.rotationMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -281,19 +342,26 @@ func (reg *Registry) ensureActiveShardLocked(ctx context.Context) (*ShardInfo, e
 
 	var lastErr error
 	for _, standby := range standbys {
-		if _, err := reg.FetchStats(ctx, standby.PrimaryURL); err != nil {
-			_ = reg.repo.MarkShardUnreachable(ctx, standby.ShardID, err.Error())
+		httpCtx, cancel := reg.controlPlaneContext(ctx)
+		_, fetchErr := reg.FetchStats(httpCtx, standby.PrimaryURL)
+		cancel()
+		if fetchErr != nil {
+			reg.rotationMu.Lock()
+			_ = reg.repo.MarkShardUnreachable(ctx, standby.ShardID, fetchErr.Error())
 			metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), false)
 			metrics.IncCoordinatorShardFailures(strconv.Itoa(standby.ShardID), "ensure_active")
-			lastErr = err
+			reg.rotationMu.Unlock()
+			lastErr = fetchErr
 			continue
 		}
+
+		reg.rotationMu.Lock()
 		_ = reg.repo.MarkShardReachable(ctx, standby.ShardID)
 		metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), true)
-
 		updated, err := reg.repo.PromoteStandby(ctx, standby.ShardID, nil)
 		if err != nil {
 			metrics.IncCoordinatorShardFailures(strconv.Itoa(standby.ShardID), "ensure_active_promote")
+			reg.rotationMu.Unlock()
 			lastErr = err
 			if errors.Is(err, ErrStateConflict) {
 				active, activeErr := reg.repo.ActiveShard(ctx)
@@ -308,6 +376,7 @@ func (reg *Registry) ensureActiveShardLocked(ctx context.Context) (*ShardInfo, e
 		}
 		_ = reg.repo.MarkShardReachable(ctx, updated.ShardID)
 		metrics.SetCoordinatorShardUp(strconv.Itoa(updated.ShardID), string(updated.State), true)
+		reg.rotationMu.Unlock()
 		slog.Info("auto-activated standby shard", "shard_id", updated.ShardID)
 		return updated, nil
 	}
@@ -324,51 +393,78 @@ func (reg *Registry) ActivateStandby(ctx context.Context) (*ShardInfo, error) {
 
 func (reg *Registry) SealAndRotate(ctx context.Context) error {
 	reg.rotationMu.Lock()
-	defer reg.rotationMu.Unlock()
-
-	return reg.sealAndRotateLocked(ctx)
-}
-
-func (reg *Registry) sealAndRotateLocked(ctx context.Context) error {
 	active, err := reg.repo.ActiveShard(ctx)
 	if err != nil {
+		reg.rotationMu.Unlock()
 		return err
 	}
 	if active == nil {
+		reg.rotationMu.Unlock()
 		return fmt.Errorf("no active shard")
 	}
 	standby, err := reg.repo.StandbyShard(ctx)
 	if err != nil {
+		reg.rotationMu.Unlock()
 		return err
 	}
 	if standby == nil {
+		reg.rotationMu.Unlock()
 		return ErrNoStandbyShard
 	}
-	if _, err := reg.FetchStats(ctx, standby.PrimaryURL); err != nil {
-		_ = reg.repo.MarkShardUnreachable(ctx, standby.ShardID, err.Error())
-		metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), false)
-		metrics.IncCoordinatorShardFailures(strconv.Itoa(standby.ShardID), "rotate")
-		return fmt.Errorf("standby shard %d is unavailable: %w", standby.ShardID, err)
-	}
-	_ = reg.repo.MarkShardReachable(ctx, standby.ShardID)
-	metrics.SetCoordinatorShardUp(strconv.Itoa(standby.ShardID), string(standby.State), true)
+	activeCopy := *active
+	standbyCopy := *standby
+	reg.rotationMu.Unlock()
 
-	slog.Info("sealing active shard", "shard_id", active.ShardID)
-	total, sealedAt, err := reg.sealShardRemote(ctx, active, "rotate")
+	httpCtx, cancel := reg.controlPlaneContext(ctx)
+	_, fetchErr := reg.FetchStats(httpCtx, standbyCopy.PrimaryURL)
+	cancel()
+	if fetchErr != nil {
+		reg.rotationMu.Lock()
+		_ = reg.repo.MarkShardUnreachable(ctx, standbyCopy.ShardID, fetchErr.Error())
+		metrics.SetCoordinatorShardUp(strconv.Itoa(standbyCopy.ShardID), string(standbyCopy.State), false)
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(standbyCopy.ShardID), "rotate")
+		reg.rotationMu.Unlock()
+		return fmt.Errorf("standby shard %d is unavailable: %w", standbyCopy.ShardID, fetchErr)
+	}
+
+	slog.Info("sealing active shard", "shard_id", activeCopy.ShardID)
+	httpCtx, cancel = reg.controlPlaneContext(ctx)
+	total, sealedAt, err := reg.sealShardRemote(httpCtx, &activeCopy, "rotate")
+	cancel()
 	if err != nil {
 		return err
 	}
-	next, err := reg.repo.PromoteStandby(ctx, standby.ShardID, &SealedShardTransition{
-		ShardID:    active.ShardID,
+
+	reg.rotationMu.Lock()
+	defer reg.rotationMu.Unlock()
+	currentActive, err := reg.repo.ActiveShard(ctx)
+	if err != nil {
+		return err
+	}
+	if currentActive == nil || currentActive.ShardID != activeCopy.ShardID || currentActive.State != ShardActive {
+		return ErrStateConflict
+	}
+	currentStandby, err := reg.repo.GetShard(ctx, standbyCopy.ShardID)
+	if err != nil {
+		return err
+	}
+	if currentStandby == nil || currentStandby.State != ShardStandby {
+		return ErrStateConflict
+	}
+	_ = reg.repo.MarkShardReachable(ctx, standbyCopy.ShardID)
+	metrics.SetCoordinatorShardUp(strconv.Itoa(standbyCopy.ShardID), string(standbyCopy.State), true)
+
+	next, err := reg.repo.PromoteStandby(ctx, standbyCopy.ShardID, &SealedShardTransition{
+		ShardID:    activeCopy.ShardID,
 		TotalBytes: total,
 		SealedAt:   sealedAt,
 	})
 	if err != nil {
-		metrics.IncCoordinatorShardFailures(strconv.Itoa(active.ShardID), "rotate_commit")
+		metrics.IncCoordinatorShardFailures(strconv.Itoa(activeCopy.ShardID), "rotate_commit")
 		return fmt.Errorf("%w: %w", ErrRotationIncomplete, err)
 	}
-	_ = reg.repo.MarkShardReachable(ctx, active.ShardID)
-	metrics.SetCoordinatorShardUp(strconv.Itoa(active.ShardID), string(ShardSealed), true)
+	_ = reg.repo.MarkShardReachable(ctx, activeCopy.ShardID)
+	metrics.SetCoordinatorShardUp(strconv.Itoa(activeCopy.ShardID), string(ShardSealed), true)
 	_ = reg.repo.MarkShardReachable(ctx, next.ShardID)
 	metrics.SetCoordinatorShardUp(strconv.Itoa(next.ShardID), string(next.State), true)
 	slog.Info("activated standby shard", "shard_id", next.ShardID)

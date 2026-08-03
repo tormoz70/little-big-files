@@ -14,6 +14,56 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestUnpackQueueWorkerSurvivesPanic(t *testing.T) {
+	repo := testmetadata.NewMemoryRepository()
+	segDir := t.TempDir()
+	segments, err := storage.NewSegmentManager(segDir, 64*1024*1024)
+	require.NoError(t, err)
+	defer segments.Close()
+
+	cfg := config.Config{
+		MaxBodyBytes:        16 * 1024 * 1024,
+		ZipThresholdSize:    10,
+		LargeZipAsyncUnpack: true,
+		DedupBackend:        "memory",
+	}
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
+	svc := ingestion.NewService(cfg, repo, blobs)
+	panicOnce := true
+	svc.SetUnpackTestHook(func(packageID int64) {
+		if panicOnce {
+			panicOnce = false
+			panic("injected unpack panic")
+		}
+	})
+	q := ingestion.NewUnpackQueue(svc, 1, 8)
+	svc.SetUnpackQueue(q)
+	defer q.Shutdown()
+
+	zipBody := makeTestZip(t, []byte(`<?xml version="1.0"?><first/>`))
+	ctx := context.Background()
+	first, err := svc.ProcessPackage(ctx, 1, zipBody, strPtr("first.zip"))
+	require.NoError(t, err)
+	q.Enqueue(first.ID)
+
+	zipBody2 := makeTestZip(t, []byte(`<?xml version="1.0"?><second/>`))
+	second, err := svc.ProcessPackage(ctx, 2, zipBody2, strPtr("second.zip"))
+	require.NoError(t, err)
+	q.Enqueue(second.ID)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		pkg, _ := repo.GetPackage(ctx, second.ID)
+		if pkg.StorageMode == ingestion.StorageZipWithMembers {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	secondPkg, err := repo.GetPackage(ctx, second.ID)
+	require.NoError(t, err)
+	require.Equal(t, ingestion.StorageZipWithMembers, secondPkg.StorageMode)
+}
+
 func TestUnpackQueueShutdown(t *testing.T) {
 	repo := testmetadata.NewMemoryRepository()
 	segDir := t.TempDir()

@@ -69,7 +69,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
+      target: server-rocksdb
     environment: &shard0-env
       HTTP_ADDR: ":8080"
       SHARD_ID: "0"
@@ -82,7 +82,6 @@ services:
       PG_DSN: postgres://lbf:lbf@shard-0-db:5432/lbf_shard0?sslmode=disable
       DATA_DIR: /data/segments
       ROCKSDB_PATH: /data/rocksdb
-      DEDUP_BACKEND: memory
       MIGRATIONS_PATH: /app/migrations
       EXAMPLES_DIR: /app/examples
       COMPRESSION_ENABLED: "true"
@@ -99,7 +98,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
+      target: server-rocksdb
     environment:
       <<: *shard0-env
       SHARD_ROLE: replica
@@ -148,7 +147,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
+      target: server-rocksdb
     environment: &shard1-env
       HTTP_ADDR: ":8080"
       SHARD_ID: "1"
@@ -161,7 +160,6 @@ services:
       PG_DSN: postgres://lbf:lbf@shard-1-db:5432/lbf_shard1?sslmode=disable
       DATA_DIR: /data/segments
       ROCKSDB_PATH: /data/rocksdb
-      DEDUP_BACKEND: memory
       MIGRATIONS_PATH: /app/migrations
       EXAMPLES_DIR: /app/examples
       COMPRESSION_ENABLED: "true"
@@ -178,7 +176,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
+      target: server-rocksdb
     environment:
       <<: *shard1-env
       SHARD_ROLE: replica
@@ -227,7 +225,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
+      target: server-rocksdb
     environment: &shard2-env
       HTTP_ADDR: ":8080"
       SHARD_ID: "2"
@@ -240,7 +238,6 @@ services:
       PG_DSN: postgres://lbf:lbf@shard-2-db:5432/lbf_shard2?sslmode=disable
       DATA_DIR: /data/segments
       ROCKSDB_PATH: /data/rocksdb
-      DEDUP_BACKEND: memory
       MIGRATIONS_PATH: /app/migrations
       EXAMPLES_DIR: /app/examples
       COMPRESSION_ENABLED: "true"
@@ -257,7 +254,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
+      target: server-rocksdb
     environment:
       <<: *shard2-env
       SHARD_ROLE: replica

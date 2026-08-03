@@ -2,9 +2,14 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
+
+type batchAppender interface {
+	batchAppend(batch []*pendingWrite)
+}
 
 type pendingWrite struct {
 	record []byte
@@ -22,14 +27,14 @@ type WriteBuffer struct {
 	pending []*pendingWrite
 	bufSize int
 
-	sm *SegmentManager
+	sm batchAppender
 
 	stop     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 }
 
-func NewWriteBuffer(sm *SegmentManager, maxSize int, maxInterval time.Duration) *WriteBuffer {
+func NewWriteBuffer(sm batchAppender, maxSize int, maxInterval time.Duration) *WriteBuffer {
 	wb := &WriteBuffer{
 		maxSize:     maxSize,
 		maxInterval: maxInterval,
@@ -97,9 +102,26 @@ func (wb *WriteBuffer) Flush() {
 	wb.bufSize = 0
 	wb.mu.Unlock()
 
+	var panicked bool
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			panicErr := fmt.Errorf("write buffer flush panic: %v", r)
+			for _, pw := range batch {
+				if pw.err == nil {
+					pw.err = panicErr
+				}
+				pw.done <- pw.err
+			}
+		}
+	}()
+
 	// batchAppend records per-write success/failure on each pendingWrite, so a
 	// single bad record no longer fails unrelated writes sharing the batch.
 	wb.sm.batchAppend(batch)
+	if panicked {
+		return
+	}
 	for _, pw := range batch {
 		pw.done <- pw.err
 	}

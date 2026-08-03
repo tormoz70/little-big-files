@@ -147,6 +147,34 @@ func TestGetFileContentTypeXML(t *testing.T) {
 	require.Equal(t, "application/xml", rec.Header().Get("Content-Type"))
 }
 
+func TestPostOversizeZipUnpackFailed(t *testing.T) {
+	env := setupHandlerEnvWithMaxUnpacked(t, 512)
+	zipBody := makeOversizeZip(t, 1024)
+	resp := postPackage(t, env, 1, zipBody, "bomb.zip")
+	require.Equal(t, "failed", resp["unpack_status"])
+	require.NotEmpty(t, resp["unpack_error"])
+}
+
+func setupHandlerEnvWithMaxUnpacked(t *testing.T, maxUnpacked int64) *handlerEnv {
+	t.Helper()
+	repo := testmetadata.NewMemoryRepository()
+	segDir := t.TempDir()
+	segments, err := storage.NewSegmentManager(segDir, 64*1024*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = segments.Close() })
+	cfg := config.Config{
+		MaxBodyBytes:          16 * 1024 * 1024,
+		MaxUnpackedZipBytes:   maxUnpacked,
+		ZipThresholdSize:      102400,
+		ZipThresholdCount:     100,
+		DedupBackend:          "memory",
+	}
+	blobs := storage.NewBlobStore(segments, nil, nil, nil)
+	ingest := ingestion.NewService(cfg, repo, blobs)
+	srv := api.NewServer(cfg, ingest, repo, blobs)
+	return &handlerEnv{server: srv, repo: repo}
+}
+
 func TestPostUnsupportedPayload(t *testing.T) {
 	env := setupHandlerEnv(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/packages?supplier_id=1", bytes.NewReader([]byte("plain text not xml")))

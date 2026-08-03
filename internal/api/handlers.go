@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -202,7 +203,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, packageID, fi
 	ct := contentTypeFor(file.Role, filename)
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Header().Set("Content-Disposition", contentDisposition(filename))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
@@ -257,6 +258,16 @@ func buildPackageResponse(cfg config.Config, pkg *metadata.Package) packageRespo
 	return resp
 }
 
+func contentDisposition(filename string) string {
+	if strings.TrimSpace(filename) == "" {
+		filename = "file.bin"
+	}
+	if cd := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); cd != "" {
+		return cd
+	}
+	return `attachment; filename="file.bin"`
+}
+
 func contentTypeFor(role, filename string) string {
 	switch role {
 	case ingestion.RoleOriginal:
@@ -294,5 +305,6 @@ func isClientError(err error) bool {
 	return strings.Contains(msg, "empty") ||
 		strings.Contains(msg, "unsupported") ||
 		strings.Contains(msg, "too large") ||
+		strings.Contains(msg, "unpacked size exceeds") ||
 		strings.Contains(msg, "supplier")
 }
